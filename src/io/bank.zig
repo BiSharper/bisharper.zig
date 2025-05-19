@@ -1,7 +1,7 @@
 const std = @import("std");
 
 //entry -----------------------------------------------------------------------------------------
-pub const BankEntryMime = extern union {
+pub const BankEntryMime = union(enum) {
     const DECOMPRESSED: i32 = 0x00000000;
     const COMPRESSED: i32 = 0x43707273;
     const ENCRYPTED: i32 = 0x456e6372;
@@ -54,7 +54,7 @@ pub const BankEntryMime = extern union {
     }
 };
 
-pub const BankEntryMeta = extern struct {
+pub const BankEntryMeta = struct {
     mime: BankEntryMime,
     size_ext: u32,
     offset: u32,
@@ -75,21 +75,21 @@ pub const BankEntryMeta = extern struct {
     }
 };
 
-pub const BankEntryMetaNamed = extern struct {
+pub const BankEntryMetaNamed = struct {
     name: []const u8,
     meta: BankEntryMeta,
 };
 
-pub const BankEntryData = extern union {
-    Uninitialized: u32,
+pub const BankEntryData = union(enum) {
+    Uninitialized: u64,
     Malformed: i64,
-    Loaded: extern struct {
-        offset: u32,
+    Loaded: struct {
+        offset: u64,
         data: []u8,
     }
 };
 
-pub const BankEntry = extern struct {
+pub const BankEntry = struct {
     named_metadata: BankEntryMetaNamed,
     data: BankEntryData,
 
@@ -104,7 +104,7 @@ pub const BankEntry = extern struct {
 };
 
 //-----------------------------------------------
-pub const BankReadOptions = struct {
+pub const BankReadOptions = extern struct {
     read_checksum:      bool,
     signed_offsets:     bool,
     require_terminator: bool,
@@ -116,7 +116,7 @@ pub const BankSource = enum {
     Open
 };
 
-pub const Bank = extern struct {
+pub const Bank = struct {
     const PREFIX_PROP_NAME = "prefix";
     allocator: std.mem.Allocator,
     properties: std.StringHashMap([]const u8),
@@ -167,86 +167,86 @@ pub const Bank = extern struct {
         self.source = BankSource.Open;
 
         if (path) |path_| {
+            allocator.free(self.path.?);
             self.path = try allocator.dupe(u8, path_);
         }
 
         var idx: usize = 0;
-        var metas_read = 0;
+        var metas_read: u32 = 0;
+        var versions_read: u32 = 0;
         var start_offset: i32 = 0;
 
-        while (idx < input.len) {
-            const name = try std.ascii.allocLowerString(allocator,
-                try readString(self.buffer, options.require_terminator)
-            );
-            idx += name.len + 1;
+        if(self.buffer) |buffer| {
+            while (idx < input.len) {
+                const name = try std.ascii.allocLowerString(allocator,
+                    try readString(buffer, options.require_terminator)
+                );
+                idx += name.len + 1;
 
-            const entry_meta: BankEntryMeta = std.mem.bytesAsValue(BankEntryMeta, input[idx..][0..@sizeOf(BankEntryMeta)]).*;
-            idx += @sizeOf(BankEntryMeta);
+                const entry_meta: BankEntryMeta = std.mem.bytesAsValue(BankEntryMeta, buffer[idx..][0..@sizeOf(BankEntryMeta)]).*;
+                idx += @sizeOf(BankEntryMeta);
 
-            metas_read += 1;
-            if(entry_meta.isVersion() and name.len == 0 and (options.vbs2_lite or (!options.vbs2_lite and metas_read == 1))) {
-                while (true) {
-                    const prop_name = try readString(self.buffer, true);
-                    if (prop_name.len == 0) { break; }
+                metas_read += 1;
+                if(entry_meta.isVersion() and name.len == 0 and (options.vbs2_lite or (!options.vbs2_lite and metas_read == 1))) {
+                    while (true) {
+                        const prop_name = try readString(buffer, true);
+                        if (prop_name.len == 0) { break; }
 
-                    const prop_value =  try readString(self.buffer, true);
+                        const prop_value =  try readString(buffer, true);
 
-                    self.properties[prop_name] = if(prop_name == PREFIX_PROP_NAME)
-                        try ensureTrailingSlash(prop_value, allocator)
-                    else
-                        prop_value;
-                }
-            } else {
-                if(name.len == 0 and entry_meta.isEnd()) break;
-                const offset = if (entry_meta.size_int > std.math.maxInt(i32)) {
-                    if (options.signed_offsets) {
-                        return error.NegativeOffset;
-                    } else {
-                        const size = @as(i32, @bitCast(entry_meta.size_int));
-                        const malfomed = BankEntryData{ .Malformed = start_offset };
-                        start_offset += size;
-                        malfomed;
+                        try self.properties.put(prop_name, if(std.mem.eql(u8, prop_name, PREFIX_PROP_NAME))
+                            try ensureTrailingSlash(prop_value, allocator)
+                        else
+                            prop_value);
                     }
+                    versions_read += 1;
                 } else {
-                    const uninitialized = BankEntryData{ .Uninitialized = start_offset };
-                    start_offset += entry_meta.size_int;
-                    uninitialized;
-                };
+                    if(name.len == 0 and entry_meta.isEnd()) break;
+                    const offset = blk: {if (entry_meta.size_int > std.math.maxInt(i32)) {
+                        if (options.signed_offsets) {
+                            return error.NegativeOffset;
+                        } else {
+                            const size = @as(i32, @bitCast(entry_meta.size_int));
+                            const malfomed = BankEntryData{ .Malformed = @intCast(start_offset) };
+                            start_offset += size;
+                            break :blk malfomed;
+                        }
+                    } else {
+                        const uninitialized = BankEntryData{ .Uninitialized = @intCast(@as(i64, start_offset)) };
+                        start_offset += @intCast(entry_meta.size_int);
+                        break :blk uninitialized;
+                    }};
 
-                self.entries[name] = BankEntry {
-                    .named_metadata = .{
-                        .name = name,
-                        .meta = entry_meta,
-                    },
-                    .data = offset,
-                };
+                    try self.entries.put(name, BankEntry {
+                        .named_metadata = .{
+                            .name = name,
+                            .meta = entry_meta,
+                        },
+                        .data = offset,
+                    });
+                }
+            }
+
+        }
+
+        var i: usize = 0;
+        var it = self.entries.iterator();
+        while (i < metas_read - versions_read) : (i += 1) {
+            const entry = it.next() orelse break;
+            const entry_ptr = entry.value_ptr;
+            switch (entry_ptr.*.data) {
+                .Loaded => |*loaded| {
+                    loaded.offset += @intCast(idx);
+                },
+                .Uninitialized => |*offset| {
+                    offset.* += @intCast(idx);
+                },
+                .Malformed => |*offset| {
+                    offset.* += @intCast(idx);
+                },
             }
         }
 
-        for (self.entries.iterator()) |entry| {
-            const name = entry.key_ptr.*;
-            const old_entry = entry.value_ptr.*;
-
-            const new_entry = BankEntry{
-                .data = switch (old_entry.data) {
-                    .Loaded => |loaded| .{
-                        .Loaded = .{
-                            .offset = loaded.offset + idx,
-                            .data = loaded.data,
-                        }
-                    },
-                    .Uninitialized => |offset| .{
-                        .Uninitialized = offset + self.buffer_offset.?,
-                    },
-                    .Malformed => |offset| .{
-                        .Malformed = offset + @as(i64, idx),
-                    },
-                },
-                .named_metadata = old_entry.named_metadata,
-            };
-
-            try self.inner.entries.put(name, new_entry);
-        }
 
         return self;
     }
@@ -265,27 +265,30 @@ pub const Bank = extern struct {
         errdefer entries.deinit();
 
         try properties.put(PREFIX_PROP_NAME, prefix_copy);
-        
+
+        const path = try allocator.dupe(u8, prefix_copy[0 .. prefix_copy.len - 1]);
+        errdefer allocator.free(path);
+
         return .{
             .allocator = allocator,
             .properties = properties,
             .source = BankSource.Created,
             .buffer = null,
             .entries = entries,
-            .path = prefix_copy[0 .. prefix_copy.len - 1]
+            .path = path
         };
     }
     
     pub fn deinit(self: *Bank) void {
-        var it = self.properties.iterator();
-        while (it.next()) |entry| {
+        var prop_it = self.properties.iterator();
+        while (prop_it.next()) |entry| {
             self.allocator.free(entry.value_ptr.*);
         }
         self.properties.deinit();
 
 
-        it = self.entries.iterator();
-        while (it.next()) |entry| {
+        var ent_it = self.entries.iterator();
+        while (ent_it.next()) |entry| {
             if (entry.value_ptr.data == .Loaded) {
                 self.allocator.free(entry.value_ptr.data.Loaded.data);
             }
@@ -301,3 +304,56 @@ pub const Bank = extern struct {
         }
     }
 };
+
+pub const BankCWrapper = extern struct {
+    inner: ?*Bank,
+    success: u8,
+
+    pub fn deinit(self: *BankCWrapper) void {
+        if(self.inner) |inner| {
+            inner.deinit();
+            inner.allocator.destroy(inner);
+        }
+        self.inner.deinit();
+        self.inner.allocator.destroy(self.inner);
+    }
+};
+
+pub export fn readBankC(
+    input:      [*]const u8,
+    input_len:  usize,
+    prefix:     [*]const u8,
+    prefix_len: usize,
+    path:       [*]const u8,
+    path_len:   usize,
+    options:   BankReadOptions,
+) BankCWrapper {
+    const allocator = std.heap.c_allocator;
+    if (allocator.create(Bank)) |bank_ptr| {
+        if (Bank.read(
+            input[0..input_len],
+            prefix[0..prefix_len],
+            path[0..path_len],
+            options,
+            allocator,
+        )) |bank| {
+            bank_ptr.* = bank;
+            return .{
+                .inner = bank_ptr,
+                .success = 1,
+            };
+        } else |_| {
+            allocator.destroy(bank_ptr);
+            return .{
+                .inner = null,
+                .success = 0,
+            };
+        }
+
+    } else |_| {
+        return .{
+            .inner = null,
+            .success = 0,
+        };
+    }
+}

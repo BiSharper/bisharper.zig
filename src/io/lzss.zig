@@ -15,7 +15,7 @@ pub const LzssError = error {
     OutOfMemory
 };
 
-pub fn lzss_decompress(
+pub fn lzssDecompress(
     input:                      []const u8,
     expected_len:               usize,
     comptime signed_checksum:   bool,
@@ -127,20 +127,20 @@ fn decompressHelper(
     r.* = (r.* + 1) & @as(i32, @intCast(N - 1));
 }
 
-fn lzss_decompress_signed(
+fn lzssDecompressSigned(
     input:        []const u8,
     expected_len: usize,
     allocator:    std.mem.Allocator
 ) LzssError![]u8 {
-    return lzss_decompress(input, expected_len, true, allocator);
+    return lzssDecompress(input, expected_len, true, allocator);
 }
 
-fn lzss_decompress_unsigned(
+fn lzssDecompressUnsigned(
     input:        []const u8,
     expected_len: usize,
     allocator:    std.mem.Allocator
 ) LzssError![]u8 {
-    return lzss_decompress(input, expected_len, false, allocator);
+    return lzssDecompress(input, expected_len, false, allocator);
 }
 
 //c exports
@@ -149,14 +149,14 @@ pub const DecompressResultC = extern struct {
     error_code: c_int,
 };
 
-pub export fn lzss_decompress_c(
+pub export fn lzssDecompressC(
     input:           [*]const u8,
     input_len:       usize,
     expected_len:    usize,
     signed_checksum: bool
 ) DecompressResultC {
     if (signed_checksum) {
-        const result = lzss_decompress_signed(
+        const result = lzssDecompressSigned(
             input[0..input_len],
             expected_len,
             std.heap.c_allocator,
@@ -176,7 +176,7 @@ pub export fn lzss_decompress_c(
             .error_code = 0,
         };
     } else {
-        const result = lzss_decompress_unsigned(
+        const result = lzssDecompressUnsigned(
             input[0..input_len],
             expected_len,
             std.heap.c_allocator,
@@ -208,7 +208,7 @@ pub const CompressResult = extern struct {
     success: u8
 };
 
-pub fn lzss_compress(
+pub fn lzssCompress(
     input:                    []const u8,
     comptime signed_checksum: bool,
     allocator:                std.mem.Allocator
@@ -457,18 +457,18 @@ const LzssContext = struct {
 
 //c exports
 //
-pub fn lzss_compress_signed(
+pub fn lzssCompressedSigned(
     input:     []const u8,
     allocator: std.mem.Allocator
 ) ![]u8  {
-    return lzss_compress( input, true, allocator);
+    return lzssCompress( input, true, allocator);
 }
 
-pub fn lzss_compress_unsigned(
+pub fn lzssCompressedUnsigned(
     input:     []const u8,
     allocator: std.mem.Allocator
 ) ![]u8  {
-    return lzss_compress( input, false, allocator);
+    return lzssCompress( input, false, allocator);
 }
 
 const CompressResultC = extern struct {
@@ -477,13 +477,13 @@ const CompressResultC = extern struct {
     success: i32
 };
 
-pub export fn lzss_compress_c(
+pub export fn lzssCompressC(
     input:           [*]const u8,
     length:          u32,
     signed_checksum: bool,
 ) CompressResultC {
     if (signed_checksum) {
-        const result = lzss_compress_signed(
+        const result = lzssCompressedSigned(
             input[0..length],
             std.heap.c_allocator,
         ) catch {
@@ -499,7 +499,7 @@ pub export fn lzss_compress_c(
             .success = 1
         };
     } else {
-        const result = lzss_compress_unsigned(
+        const result = lzssCompressedUnsigned(
             input[0..length],
             std.heap.c_allocator,
         ) catch {
@@ -536,11 +536,11 @@ test "LZSS De/Compress Roundtrip" {
     };
 
     for (test_cases) |input| {
-        const compressed = try lzss_compress(input, false, test_allocator);
+        const compressed = try lzssCompress(input, false, test_allocator);
 
         defer test_allocator.free(compressed);
 
-        const decompressed = try lzss_decompress(compressed, input.len, false, test_allocator);
+        const decompressed = try lzssDecompress(compressed, input.len, false, test_allocator);
 
         defer test_allocator.free(decompressed);
 
@@ -551,7 +551,7 @@ test "LZSS De/Compress Roundtrip" {
 test "LZSS invalid data handling" {
     const invalid_data = [_]u8{0xFF} ** 10;
     const expected_len = 100;
-    const data = lzss_decompress(&invalid_data, expected_len, false, test_allocator);
+    const data = lzssDecompress(&invalid_data, expected_len, false, test_allocator);
     try testing.expectError(LzssError.InvalidData, data);
 }
 
@@ -559,11 +559,11 @@ test "LZSS with signed checksum" {
     const test_data = "Test with signed checksum";
 
     // Compress
-    const compressed = try lzss_compress(test_data, true, test_allocator);
+    const compressed = try lzssCompress(test_data, true, test_allocator);
     defer test_allocator.free(compressed);
 
     // Decompress with signed checksum
-    const decompressed = try lzss_decompress(compressed, test_data.len, true, // signed checksum
+    const decompressed = try lzssDecompress(compressed, test_data.len, true, // signed checksum
         test_allocator);
     defer test_allocator.free(decompressed);
 
@@ -575,11 +575,11 @@ test "LZSS with unsigned checksum" {
     const test_data = "Test with signed checksum";
 
     // Compress
-    const compressed = try lzss_compress(test_data, false, test_allocator);
+    const compressed = try lzssCompress(test_data, false, test_allocator);
     defer test_allocator.free(compressed);
 
     // Decompress with unsigned checksum
-    const decompressed = try lzss_decompress(compressed,test_data.len, false, // unsigned checksum
+    const decompressed = try lzssDecompress(compressed,test_data.len, false, // unsigned checksum
         test_allocator);
     defer test_allocator.free(decompressed);
 
@@ -600,10 +600,10 @@ test "LZSS with random binary data" {
             byte.* = random.int(u8);
         }
 
-        const compressed = try lzss_compress(original_data, false, test_allocator);
+        const compressed = try lzssCompress(original_data, false, test_allocator);
         defer test_allocator.free(compressed);
 
-        const decompressed = try lzss_decompress(compressed, original_data.len, false, test_allocator);
+        const decompressed = try lzssDecompress(compressed, original_data.len, false, test_allocator);
         defer test_allocator.free(decompressed);
 
         try testing.expectEqualSlices(u8, original_data, decompressed);
