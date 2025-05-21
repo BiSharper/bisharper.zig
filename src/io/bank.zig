@@ -86,6 +86,10 @@ pub const BankEntryData = union(enum) {
     Loaded: struct {
         offset: u64,
         data: []u8,
+    },
+    Patched: struct {
+        offset: u64,
+        data: []u8,
     }
 };
 
@@ -105,7 +109,7 @@ pub const BankEntry = struct {
 
 //-----------------------------------------------
 pub const BankReadOptions = extern struct {
-    read_checksum:      bool,
+    verify_checksum:    bool,
     signed_offsets:     bool,
     require_terminator: bool,
     vbs2_lite:          bool
@@ -231,7 +235,8 @@ pub const Bank = struct {
 
         var i: usize = 0;
         var it = self.entries.iterator();
-        while (i < metas_read - versions_read) : (i += 1) {
+        const data_files = metas_read - versions_read ;
+        while (i < data_files) : (i += 1) {
             const entry = it.next() orelse break;
             const entry_ptr = entry.value_ptr;
             switch (entry_ptr.*.data) {
@@ -244,6 +249,22 @@ pub const Bank = struct {
                 .Malformed => |*offset| {
                     offset.* += @intCast(idx);
                 },
+            }
+        }
+
+        if(options.verify_checksum) {
+            //later we should go on end length of last entry in buffer (what if signature isnt 24 bytes)
+            const data_section = input[0..input.len - 24];
+            const checksum_section = input[input.len - 24..];
+
+            const checksum_version = std.mem.readIntLittle(u32, checksum_section[0..4]);
+            if (checksum_version != 0) return error.UnknownChecksumVersion;
+
+            var hash_buf: [20]u8 = undefined;
+            std.crypto.hash.Sha1.hash(data_section, &hash_buf);
+
+            if (!std.mem.eql(u8, hash_buf[0..], checksum_section[4..24])) {
+                return error.InvalidChecksum;
             }
         }
 
@@ -314,8 +335,6 @@ pub const BankCWrapper = extern struct {
             inner.deinit();
             inner.allocator.destroy(inner);
         }
-        self.inner.deinit();
-        self.inner.allocator.destroy(self.inner);
     }
 };
 
