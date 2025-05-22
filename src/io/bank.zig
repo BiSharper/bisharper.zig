@@ -75,14 +75,10 @@ pub const BankEntryMeta = struct {
     }
 };
 
-pub const BankEntryMetaNamed = struct {
-    name: []const u8,
-    meta: BankEntryMeta,
-};
-
 pub const BankEntryData = union(enum) {
     Uninitialized: u64,
     Malformed: i64,
+    Stitched: []u8,
     Loaded: struct {
         offset: u64,
         data: []u8,
@@ -90,21 +86,23 @@ pub const BankEntryData = union(enum) {
     Patched: struct {
         offset: u64,
         data: []u8,
+    },
+
+
+    pub fn incrementOffset(self: *BankEntryData, incrementation: usize) !void {
+        return switch (self.*) {
+            .Loaded => |*loaded| loaded.offset += @intCast(incrementation),
+            .Patched => |*loaded| loaded.offset += @intCast(incrementation),
+            .Uninitialized => |*offset| offset.* += @intCast(incrementation),
+            .Malformed => |*offset| offset.* += @intCast(incrementation),
+            else => error.NoOffsetToIncrement
+        };
     }
 };
 
 pub const BankEntry = struct {
-    named_metadata: BankEntryMetaNamed,
+    meta: BankEntryMeta,
     data: BankEntryData,
-
-
-    pub fn dataOffset(self: BankEntry) u32 {
-        return switch (self.data) {
-            .Loaded => |loaded| loaded.offset,
-            .Malformed => |malformed_offset| @as(u32, @intCast(malformed_offset)),
-            else => 0,
-        };
-    }
 };
 
 //-----------------------------------------------
@@ -168,6 +166,7 @@ pub const Bank = struct {
         errdefer self.deinit();
 
         self.buffer = try allocator.dupe(u8, input);
+
         self.source = BankSource.Open;
 
         if (path) |path_| {
@@ -222,10 +221,7 @@ pub const Bank = struct {
                     }};
 
                     try self.entries.put(name, BankEntry {
-                        .named_metadata = .{
-                            .name = name,
-                            .meta = entry_meta,
-                        },
+                        .meta = entry_meta,
                         .data = offset,
                     });
                 }
@@ -234,34 +230,36 @@ pub const Bank = struct {
         }
 
         var i: usize = 0;
+        var last_offset: u64 = @intCast(idx);
         var it = self.entries.iterator();
         const data_files = metas_read - versions_read ;
-        while (i < data_files) : (i += 1) {
+        while (true) : (i += 1) {
             const entry = it.next() orelse break;
-            const entry_ptr = entry.value_ptr;
-            switch (entry_ptr.*.data) {
-                .Loaded => |*loaded| {
-                    loaded.offset += @intCast(idx);
-                },
-                .Uninitialized => |*offset| {
-                    offset.* += @intCast(idx);
-                },
-                .Malformed => |*offset| {
-                    offset.* += @intCast(idx);
-                },
+            var data = entry.value_ptr.data;
+            try data.incrementOffset(idx);
+            if(i + 1 == data_files)  {
+                last_offset = switch (data) {
+                    .Loaded => |loaded| loaded.offset,
+                    .Patched => |loaded| loaded.offset,
+                    .Uninitialized => |offset| offset,
+                    .Malformed => |malformed_offset| @as(u32, @intCast(malformed_offset)),
+                    else => return error.UnknownLastEntry,
+                };
+                break;
             }
         }
 
         if(options.verify_checksum) {
-            //later we should go on end length of last entry in buffer (what if signature isnt 24 bytes)
-            const data_section = input[0..input.len - 24];
-            const checksum_section = input[input.len - 24..];
+            const data_section = input[0..@intCast(last_offset)];
+            const checksum_section = input[@intCast(last_offset)..];
 
-            const checksum_version = std.mem.readIntLittle(u32, checksum_section[0..4]);
+            const checksum_version = std.mem.readInt(u32, checksum_section[0..4], .little);
             if (checksum_version != 0) return error.UnknownChecksumVersion;
 
             var hash_buf: [20]u8 = undefined;
-            std.crypto.hash.Sha1.hash(data_section, &hash_buf);
+            std.crypto.hash.Sha1.hash(data_section, &hash_buf, .{
+
+            });
 
             if (!std.mem.eql(u8, hash_buf[0..], checksum_section[4..24])) {
                 return error.InvalidChecksum;
