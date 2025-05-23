@@ -230,28 +230,18 @@ pub const Bank = struct {
         }
 
         var i: usize = 0;
-        var last_offset: u64 = @intCast(idx);
         var it = self.entries.iterator();
         const data_files = metas_read - versions_read ;
-        while (true) : (i += 1) {
+        while (i < data_files) : (i += 1) {
             const entry = it.next() orelse break;
             var data = entry.value_ptr.data;
             try data.incrementOffset(idx);
-            if(i + 1 == data_files)  {
-                last_offset = switch (data) {
-                    .Loaded => |loaded| loaded.offset,
-                    .Patched => |loaded| loaded.offset,
-                    .Uninitialized => |offset| offset,
-                    .Malformed => |malformed_offset| @as(u32, @intCast(malformed_offset)),
-                    else => return error.UnknownLastEntry,
-                };
-                break;
-            }
+
         }
 
         if(options.verify_checksum) {
-            const data_section = input[0..@intCast(last_offset)];
-            const checksum_section = input[@intCast(last_offset)..];
+            const data_section = input[0..input.len - 24];
+            const checksum_section = input[input.len - 24..];
 
             const checksum_version = std.mem.readInt(u32, checksum_section[0..4], .little);
             if (checksum_version != 0) return error.UnknownChecksumVersion;
