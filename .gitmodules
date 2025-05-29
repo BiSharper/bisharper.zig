@@ -1,0 +1,3 @@
+[submodule "bisharper_extras"]
+	path = src/extras
+	url = https://github.com/BiSharper/bisharper_extras.zig
