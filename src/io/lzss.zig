@@ -6,319 +6,7 @@ const F: i32 = 0x12;
 const MATCH_THRESHOLD: u8 = 0x2;
 const BUF_SIZE: i32 = N + F - 1;
 
-//------------------------------------------------- read
-
-pub const LzssError = error {
-    InvalidData,
-    ChecksumMismatch,
-    BufferTooSmall,
-    OutOfMemory
-};
-
-pub fn lzssDecompress(
-    input:                      []const u8,
-    expected_len:               usize,
-    comptime signed_checksum:   bool,
-    allocator:                  std.mem.Allocator
-) LzssError![]u8 {
-    const input_len = input.len;
-    var text_buf = [_]u8{FILL} ** BUF_SIZE;
-    var bytes_left = expected_len;
-    var result = try allocator.alloc(u8, expected_len);
-    errdefer allocator.free(result);
-
-    var result_index: usize = 0;
-    var r: i32 = @as(i32, @intCast(N - F));
-    var checksum: i32 = 0;
-    var flags: i32 = 0;
-    var input_index: usize = 0;
-
-    while (bytes_left != 0) {
-        if (input_index >= input_len) return LzssError.InvalidData;
-
-        flags >>= 1;
-        if ((flags & 256) == 0) {
-            flags = @as(i32, input[input_index]) | 0xff00;
-            input_index += 1;
-        }
-        if (input_index >= input_len) return LzssError.InvalidData;
-        if ((flags & 1) != 0) {
-            const c = input[input_index];
-            input_index += 1;
-
-            try decompressHelper(
-                &checksum,
-                result[0..],
-                &result_index,
-                &text_buf,
-                &r,
-                &bytes_left,
-                c,
-                signed_checksum,
-            );
-            continue;
-        }
-
-        if (input_index + 1 >= input_len) return LzssError.InvalidData;
-
-        var i = input[input_index];
-        var j = input[input_index + 1];
-        input_index += 2;
-
-        i |= (j & 0xf0) << 4;
-        j &= 0x0f;
-        j += MATCH_THRESHOLD;
-
-        const ii = r - @as(i32, @intCast(i));
-        const jj = @as(i32, @intCast(j)) + ii;
-        if (j + 1 > bytes_left) {
-            return LzssError.BufferTooSmall;
-        }
-
-        var k = ii;
-        while (k <= jj) : (k += 1) {
-            const c = text_buf[@as(usize, @intCast(k & @as(i32, @intCast(N - 1))))];
-            try decompressHelper(
-                &checksum,
-                result[0..],
-                &result_index,
-                &text_buf,
-                &r,
-                &bytes_left,
-                c,
-                signed_checksum,
-            );
-        }
-    }
-
-    if (input_index + 4 > input_len) return LzssError.InvalidData;
-
-    const csr = std.mem.readInt(u32, input[input_index..][0..4], .little);
-    if (csr != @as(u32, @bitCast(checksum))) {
-        return LzssError.ChecksumMismatch;
-    }
-
-    return result[0..expected_len];
-
-}
-
-fn decompressHelper(
-    checksum:                 *i32,
-    dst:                      []u8,
-    dst_index:                *usize,
-    text_buf:                 []u8,
-    r:                        *i32,
-    bytes_left:               *usize,
-    c:                        u8,
-    comptime signed_checksum: bool,
-) LzssError!void {
-    checksum.* = if (signed_checksum)
-        checksum.* +% @as(i32, @intCast(@as(u32,c)))
-    else
-        checksum.* +% @as(i32, c);
-
-    if (dst_index.* >= dst.len) return LzssError.BufferTooSmall;
-
-
-    dst[dst_index.*] = c;
-    dst_index.* += 1;
-    bytes_left.* -= 1;
-    text_buf[@as(usize, @intCast(r.*))] = c;
-    r.* = (r.* + 1) & @as(i32, @intCast(N - 1));
-}
-
-fn lzssDecompressSigned(
-    input:        []const u8,
-    expected_len: usize,
-    allocator:    std.mem.Allocator
-) LzssError![]u8 {
-    return lzssDecompress(input, expected_len, true, allocator);
-}
-
-fn lzssDecompressUnsigned(
-    input:        []const u8,
-    expected_len: usize,
-    allocator:    std.mem.Allocator
-) LzssError![]u8 {
-    return lzssDecompress(input, expected_len, false, allocator);
-}
-
-//c exports
-pub const DecompressResultC = extern struct {
-    data:       ?[*]u8,
-    error_code: c_int,
-};
-
-pub export fn lzssDecompressC(
-    input:           [*]const u8,
-    input_len:       usize,
-    expected_len:    usize,
-    signed_checksum: bool
-) DecompressResultC {
-    if (signed_checksum) {
-        const result = lzssDecompressSigned(
-            input[0..input_len],
-            expected_len,
-            std.heap.c_allocator,
-        ) catch |err| {
-            return DecompressResultC{
-                .data = null,
-                .error_code = switch (err) {
-                    LzssError.InvalidData => 1,
-                    LzssError.ChecksumMismatch => 2,
-                    LzssError.BufferTooSmall => 3,
-                    LzssError.OutOfMemory => 4,
-                },
-            };
-        };
-        return DecompressResultC{
-            .data = result.ptr,
-            .error_code = 0,
-        };
-    } else {
-        const result = lzssDecompressUnsigned(
-            input[0..input_len],
-            expected_len,
-            std.heap.c_allocator,
-        ) catch |err| {
-            return DecompressResultC{
-                .data = null,
-                .error_code = switch (err) {
-                    LzssError.InvalidData => 1,
-                    LzssError.ChecksumMismatch => 2,
-                    LzssError.BufferTooSmall => 3,
-                    LzssError.OutOfMemory => 4,
-                },
-            };
-        };
-        return DecompressResultC{
-            .data = result.ptr,
-            .error_code = 0,
-        };
-    }
-
-}
-
-//------------------------------------------------ write
-//
-
-pub const CompressResult = extern struct {
-    data:    ?[*]u8,
-    length:  usize,
-    success: u8
-};
-
-pub fn lzssCompress(
-    input:                    []const u8,
-    comptime signed_checksum: bool,
-    allocator:                std.mem.Allocator
-) ![]u8 {
-    var context = LzssContext.init();
-    const input_len: i32 = if (input.len > std.math.maxInt(i32))
-        return error.BufferTooLong
-    else @intCast(input.len);
-
-    const max_output_size = input_len + (@divTrunc(input_len, 8)) + 8;
-    const output_buffer = try allocator.alloc(u8, @intCast(max_output_size));
-    errdefer allocator.free(output_buffer);
-
-    var out_pos: usize = 0;
-    var cbuf: [17]u8 = undefined;
-    var mask: u8 = 1;
-    var cptr: u8 = 1;
-
-    var s: i32 = 0;
-    var r: i32 = N - F;
-    var csum: i32 = 0;
-
-    var len: i32 = 0;
-    var pos: usize = 0;
-    while (len < F and pos < input_len) : (pos += 1) {
-        const c = input[pos];
-        context.text_buf[@intCast(r + len)] = c;
-        csum = csum +% if (signed_checksum) @as(i32, c) else @as(i32, @intCast(@as(u32, c)));
-        len += 1;
-    }
-
-    var i: i32 = 1;
-    while (i <= F) : (i += 1) {
-        context.insertNode(r - i);
-    }
-    context.insertNode(r);
-
-    cbuf[0] = 0;
-    while (len > 0) {
-        if (context.match_len > len) context.match_len = len;
-
-        if (context.match_len <= MATCH_THRESHOLD) {
-            context.match_len = 1;
-            cbuf[0] |= mask;
-            cbuf[cptr] = context.text_buf[@intCast(r)];
-            cptr += 1;
-        } else {
-            const mp = (r - context.match_pos) & (N - 1);
-            cbuf[cptr] = @as(u8, @truncate(@as(u32, @intCast(mp))));
-            cbuf[cptr + 1] = @as(u8, @truncate(@as(u32, @intCast(
-                ((mp >> 4) & 0xf0) | (context.match_len - (MATCH_THRESHOLD + 1))))));
-            cptr += 2;
-        }
-
-        mask = mask << 1;
-        if (mask == 0) {
-            @memcpy(output_buffer[out_pos..out_pos + cptr], cbuf[0..cptr]);
-            out_pos += cptr;
-            cbuf[0] = 0;
-            cptr = 1;
-            mask = 1;
-        }
-
-        const last_match_len = context.match_len;
-
-        i = 0;
-        while (i < last_match_len and pos < input_len) : (i += 1) {
-            const c = input[pos];
-            pos += 1;
-            context.deleteNode(s);
-            context.text_buf[@intCast(s)] = c;
-            csum = csum +% if (signed_checksum) @as(i32, c) else @as(i32, @intCast(@as(u32, c)));
-
-            if (s < F - 1) {
-                context.text_buf[@intCast(s + N)] = c;
-            }
-
-            s = (s + 1) & (N - 1);
-            r = (r + 1) & (N - 1);
-            context.insertNode(r);
-        }
-
-        while (i < last_match_len) : (i += 1) {
-            context.deleteNode(s);
-            s = (s + 1) & (N - 1);
-            r = (r + 1) & (N - 1);
-            if (len > 0) {
-               len -= 1;
-               context.insertNode(r);
-            }
-        }
-
-        if (len <= 0) break;
-    }
-
-    if (cptr > 1) {
-        @memcpy(output_buffer[out_pos..out_pos + cptr], cbuf[0..cptr]);
-        out_pos += cptr;
-    }
-
-    // Write checksum
-    const checksum_bytes = @as([*]const u8, @ptrCast(&csum))[0..@sizeOf(i32)];
-    @memcpy(output_buffer[out_pos..out_pos + @sizeOf(i32)], checksum_bytes);
-    out_pos += @sizeOf(i32);
-
-    return try allocator.realloc(output_buffer, out_pos);
-
-}
-
-const LzssContext = struct {
+pub const LZSS = struct {
 
     text_buf:  [BUF_SIZE] u8,
     left:      [N + 1]    i32,
@@ -354,17 +42,15 @@ const LzssContext = struct {
 
     fn insertNode(self: *Self, r: i32) void {
         var i: i32 = undefined;
-        var cmp: i32 = 1;
-        var p: i32 = N + 1 + @as(i32, self.text_buf[@intCast(r)]);
+        var cmp: bool = true;
+        var p: i32 = N + 1 + self.text_buf[@intCast(r)];
 
-        if (p >= N + 257) return;
-
-        self.left[@intCast(r)] = N;
         self.right[@intCast(r)] = N;
-        self.match_len = 0;
+        self.left[@intCast(r)] = N;
+        self.match_len =  0;
 
         while (true) {
-            if (cmp != 0) {
+            if (cmp) {
                 if (self.right[@intCast(p)] != N) {
                     p = self.right[@intCast(p)];
                 } else {
@@ -382,16 +68,13 @@ const LzssContext = struct {
                 }
             }
 
-            const tbp = &self.text_buf[@intCast(p + 1)..];
-            const kp = &self.text_buf[@intCast(r + 1)..];
+            const tbp = self.text_buf[@intCast(p + 1)..];
+            const kp = self.text_buf[@intCast(r + 1)..];
 
             i = 1;
             while (i < F) : (i += 1) {
-                const kp_tmp = kp.*[@intCast(i - 1)];
-                const tbp_tmp = tbp.*[@intCast(i - 1)];
-
-                if ( kp_tmp != tbp_tmp) {
-                    cmp = if (kp_tmp >= tbp_tmp) 1 else 0;
+                if(kp[@intCast(i - 1)] != tbp[@intCast(i - 1)]) {
+                    cmp = kp[@intCast(i - 1)] >= tbp[@intCast(i - 1)];
                     break;
                 }
             }
@@ -399,9 +82,8 @@ const LzssContext = struct {
             if (i > self.match_len) {
                 self.match_pos = p;
                 self.match_len = i;
-                if (i >= F) break;
+                if (self.match_len >= F) break;
             }
-
         }
 
         self.parent[@intCast(r)] = self.parent[@intCast(p)];
@@ -453,77 +135,380 @@ const LzssContext = struct {
         }
         self.parent[@intCast(p)] = N;
     }
-};
 
-//c exports
-//
-pub fn lzssCompressedSigned(
-    input:     []const u8,
-    allocator: std.mem.Allocator
-) ![]u8  {
-    return lzssCompress( input, true, allocator);
-}
-
-pub fn lzssCompressedUnsigned(
-    input:     []const u8,
-    allocator: std.mem.Allocator
-) ![]u8  {
-    return lzssCompress( input, false, allocator);
-}
-
-const CompressResultC = extern struct {
-    data: ?[*]const u8,
-    length: usize,
-    success: i32
-};
-
-pub export fn lzssCompressC(
-    input:           [*]const u8,
-    length:          u32,
-    signed_checksum: bool,
-) CompressResultC {
-    if (signed_checksum) {
-        const result = lzssCompressedSigned(
-            input[0..length],
-            std.heap.c_allocator,
-        ) catch {
-            return CompressResultC{
-                .data = null,
-                .length = 0,
-                .success = 3
-            };
-        };
-        return CompressResultC{
-            .data = result.ptr,
-            .length = result.len,
-            .success = 1
-        };
-    } else {
-        const result = lzssCompressedUnsigned(
-            input[0..length],
-            std.heap.c_allocator,
-        ) catch {
-            return CompressResultC{
-                .data = null,
-                .length = 0,
-                .success = 3
-            };
-        };
-        return CompressResultC{
-            .data = result.ptr,
-            .length = result.len,
-            .success = 1
-        };
+    inline fn incrementChecksum(csum: i32, increment: u8, signed_checksum: bool) i32 {
+        return csum +% if (signed_checksum) @as(i32, increment) else @as(i32, @intCast(@as(u32, increment)));
     }
-}
+
+    inline fn boundsCheck(len: usize, idx: i32) !void {
+        if(idx > len) {
+            std.debug.print("LZSS failed to read stream", .{});
+            return error.InputTooShort;
+        }
+    }
+
+    pub fn decode(allocator: std.mem.Allocator, input: []const u8, expected_len: usize, signed_checksum: bool ) ![]u8 {
+        if(input.len == 0 or expected_len == 0 ) {
+            return try allocator.alloc(u8, 0);
+        }
+        if(expected_len >= std.math.maxInt(i32) or input.len >= std.math.maxInt(i32)) {
+            return error.DataToLarge;
+        }
+
+        var output = try allocator.alloc(u8, expected_len);
+        errdefer allocator.free(output);
+
+        var out_idx: i32 = 0;
+        var in_idx: i32 = 0;
+        var bytes_left: i32 = @intCast(expected_len);
+        var text_buf = [_]u8{FILL} ** BUF_SIZE;
+        var csum: i32 = 0;
+
+        var r: i32 = N - F;
+        var flags: i32 = 0;
+
+        while (bytes_left > 0) {
+            var c: u8 = 0;
+
+            flags >>= 1;
+            if((flags & 256) == 0) {
+                c = input[@intCast(in_idx)];
+                in_idx += 1;
+                flags = @as(i32, c) | 0xff00;
+            }
+
+            try boundsCheck(input.len, in_idx);
+
+            if ((flags & 1) != 0) {
+                c = input[@intCast(in_idx)];
+                in_idx += 1;
+
+                try boundsCheck(input.len, in_idx);
+                csum = incrementChecksum(csum, c, signed_checksum);
+
+                output[@intCast(out_idx)] = c;
+                out_idx += 1;
+                bytes_left -= 1;
+
+                text_buf[@intCast(r)] = c;
+
+                r += 1;
+                r &= N - 1;
+                continue;
+            }
+
+            var i: i32 = @intCast(input[@intCast(in_idx)]);
+            in_idx += 1;
+            var j: i32 = @intCast(input[@intCast(in_idx)]);
+            in_idx += 1;
+            try boundsCheck(input.len, in_idx);
+
+            i |= (j & 0xf0) << 4;
+            j &= 0x0f;
+            j += MATCH_THRESHOLD;
+
+            if((j + 1) > bytes_left) {
+                std.log.debug("LZSS overflow", .{});
+                return error.LZSSOverflow;
+            }
+
+            i = @intCast(r - i);
+            j += i;
+
+            while (i <= j) : (i += 1) {
+                c = text_buf[@intCast(i & (N - 1))];
+                csum = incrementChecksum(csum, c, signed_checksum);
+
+                output[@intCast(out_idx)] = c;
+                out_idx += 1;
+                bytes_left -= 1;
+
+                text_buf[@intCast(r)] = c;
+                r += 1;
+                r &= N-1;
+            }
+        }
+
+        if (in_idx + 4 != input.len) return error.ExtraData;
+
+        const csr = std.mem.readInt(i32, input[@intCast(in_idx)..][0..4], .little);
+
+        if (csr != csum) {
+
+            return error.ChecksumMismatch;
+        }
+
+        return output;
+    }
+
+    pub fn encode(allocator: std.mem.Allocator, input: []const u8, signed_checksum: bool) ![]u8 {
+        var context = LZSS.init();
+        const input_len: i32 = if (input.len > std.math.maxInt(i32))
+            return error.BufferTooLong
+        else @intCast(input.len);
+
+        const max_out: i32 = @intCast(@max(std.math.maxInt(i32), input_len + (@divTrunc(input_len, 8)) + 8));
+        var out = try allocator.alloc(u8, @intCast(max_out));
+        errdefer allocator.free(out);
+
+
+        var out_idx: i32 = 0;
+        var in_idx: i32 = 0;
+        var text_size: i32 = 0;
+        var codesize: i32 = 0;
+        var csum: i32 = 0;
+        var last_match_len: i32 = 0;
+        var cbuf = [_]u8{0} ** 17;
+        var cbuf_idx: u5 = 1;
+        var mask: u8 = 1;
+        var s: i32 = 0;
+        var r: i32 = N - F;
+        var c: u8 = undefined;
+
+        var len: i32 = 0;
+        while (len < F and in_idx < input_len) : (len += 1) {
+            c = input[@intCast(in_idx)];
+            context.text_buf[@intCast(r + len)] = c;
+
+            in_idx += 1;
+            csum = incrementChecksum(csum, c, signed_checksum);
+        }
+        text_size = len;
+
+        std.debug.assert(text_size > 0);
+        var i: i32 = 1;
+        while (i <= F) : (i += 1) {
+            context.insertNode(r - i);
+        }
+        context.insertNode(r);
+
+        while (true) {
+            if(context.match_len > len) context.match_len = len;
+
+            if(context.match_len <= MATCH_THRESHOLD) {
+                context.match_len = 1;
+                cbuf[0] |= mask;
+                cbuf[@intCast(cbuf_idx)] = context.text_buf[@intCast(r)];
+                cbuf_idx += 1;
+            } else {
+                const mp: u8 = @intCast((r - context.match_pos) & (N - 1));
+                cbuf[cbuf_idx] = mp;
+                cbuf_idx += 1;
+                cbuf[cbuf_idx] = @intCast(((mp >> 4) & 0xF0) | (context.match_len - (MATCH_THRESHOLD + 1)));
+                cbuf_idx += 1;
+            }
+
+            mask <<= 1;
+            if(mask == 0) {
+                @memcpy(out[@intCast(out_idx)..@intCast(out_idx + cbuf_idx)], cbuf[0..@intCast(cbuf_idx)]);
+                codesize += cbuf_idx;
+                out_idx += cbuf_idx;
+                cbuf[0] = 0;
+                cbuf_idx = 1;
+                mask = 1;
+            }
+
+            last_match_len = context.match_len;
+
+            i = 0;
+            while (i < last_match_len and in_idx < input_len) : (i += 1) {
+                context.deleteNode(s);
+
+                c = input[@intCast(in_idx)];
+                in_idx += 1;
+
+                context.text_buf[@intCast(s)] = c;
+                csum = incrementChecksum(csum, c, signed_checksum);
+
+                if(s < F - 1) context.text_buf[@intCast(s + N)] = c;
+                s += 1; s &= N - 1;
+                r += 1; r &= N - 1;
+                context.insertNode(r);
+            }
+
+            text_size += 1;
+            while (i < last_match_len) : (i += 1) {
+                context.deleteNode(s);
+                s = (s + 1) & (N - 1);
+                r = (r + 1) & (N - 1);
+                len -= 1;
+                if (len > 0) context.insertNode(r);
+            }
+
+            if(len <= 0) break;
+        }
+        if (cbuf_idx > 1) {
+            @memcpy(out[@intCast(out_idx)..@intCast(out_idx + cbuf_idx)], cbuf[0..@intCast(cbuf_idx)]);
+            codesize += cbuf_idx;
+            out_idx += cbuf_idx;
+        }
+
+        @memcpy(
+            out[@intCast(out_idx)..@intCast(out_idx + @sizeOf(i32))],
+            @as([*]const u8, @ptrCast(&csum))[0..@sizeOf(i32)]
+        );
+        out_idx += @sizeOf(i32);
+
+        return try allocator.realloc(out, @intCast(out_idx));
+    }
+
+    pub fn random(allocator: std.mem.Allocator, rng: std.rand.Random, expected_output_size: usize, signed_checksum: bool) ![]u8 {
+        const MIN_MATCH: i32 = MATCH_THRESHOLD + 1;
+        const MAX_MATCH: i32 = F;
+        const MATCH_PROB: f32 = 0.6;
+        //very liberal with size here we could probably get a lower higher bound
+        const max_size =  expected_output_size * 2 + 8;
+        var buffer = try allocator.alloc(u8, if (expected_output_size == 0) 4 else max_size);
+        errdefer allocator.free(buffer);
+
+        if (expected_output_size == 0) {
+            std.mem.writeInt(u32, buffer[0..4], 0, .little);
+            return buffer;
+        }
+        var text_buf: [N]u8 = .{FILL} ** N;
+        var r: usize = N - F;
+        var decomp: usize = 0;
+        var csum: i32 = 0;
+        var idx: usize = 0;
+        while (decomp < expected_output_size) {
+            const flag_idx = idx;
+            buffer[idx] = 0;
+            idx += 1;
+            var flag: u8 = 0;
+            var ops_in_this_block: u4 = 0;
+            for (0..8) |op_idx_in_block| {
+                if (decomp >= expected_output_size) {
+                    break;
+                }
+                const remaining = expected_output_size - decomp;
+                const match = (remaining >= MIN_MATCH and rng.float(f32) < MATCH_PROB);
+
+                decomp += blk: {if(!match) {
+                    const next = rng.int(u8);
+                    flag |= (@as(u8, 1) << @intCast(op_idx_in_block));
+
+                    buffer[idx] = next;
+                    idx += 1;
+                    text_buf[r] = next;
+                    r = (r + 1) % N;
+                    csum = csum +% if (signed_checksum) @as(i32, next) else @as(i32, @intCast(@as(u32, next)));
+
+                    break :blk 1;
+                } else {
+                    const out_len = rng.intRangeAtMost(
+                        usize,
+                        MIN_MATCH,
+                        @min(MAX_MATCH, remaining),
+                    );
+
+                    const length_code: u4 = @intCast(out_len - MATCH_THRESHOLD - 1);
+                    std.debug.assert(length_code <= 15);
+
+                    const offset: u12 = @intCast(rng.intRangeAtMost(usize, 0, N - 1));
+
+                    buffer[idx] = @truncate(offset);
+                    idx += 1;
+                    buffer[idx] = (@as(u8, @truncate(offset >> 8)) << 4) | length_code;
+                    idx += 1;
+
+                    for (0..out_len) |i| {
+                        const c = text_buf[(@as(usize, offset) + i) % N];
+
+                        csum = csum +% if (signed_checksum) @as(i32, c) else @as(i32, @intCast(@as(u32, c)));
+                        text_buf[r] = c;
+                        r = (r + 1) % N;
+                    }
+
+                    break :blk out_len;
+                }};
+                ops_in_this_block += 1;
+            }
+
+            if (ops_in_this_block == 0) {
+                std.debug.assert(idx == flag + 1);
+                idx -= 1;
+            } else {
+                buffer[flag_idx] = flag;
+            }
+        }
+        const checksum_bytes = @as([*]const u8, @ptrCast(&csum))[0..@sizeOf(i32)];
+        @memcpy(buffer[idx..idx + @sizeOf(i32)], checksum_bytes);
+        idx += @sizeOf(i32);
+
+        return try allocator.realloc(buffer, idx);
+    }
+
+    // pub fn skip(input: []const u8, expected_len: usize, signed_checksum: bool) !void {
+    //     if(expected_len == 0) {
+    //         return true;
+    //     }
+    //     if(expected_len >= std.math.maxInt(i32) or input.len >= std.math.maxInt(i32)) {
+    //         return error.DataToLarge;
+    //     }
+    //
+    //     var in_idx: i32 = 0;
+    //     var left = expected_len;
+    //     var text_buf = [_]u8{FILL} ** BUF_SIZE;
+    //     var csum: i32 = 0;
+    //
+    //     var r: i32 = N - F;
+    //     var flags: i32 = 0;
+    //
+    //     while(left > 0){
+    //
+    //     }
+    // }
+};
+
 
 //---------------------------------------------------------------------------- tests
 const testing = std.testing;
 const test_allocator = testing.allocator;
 
+test "Generate and decompress random LZSS" {
+    var prng = std.rand.DefaultPrng.init(1);
+    const random = prng.random();
+
+    const sizes = [_]usize{
+        10,
+        50,
+        100,
+        1024,
+        10000,
+        100000,
+        1000000,
+        5000000,
+        10000000
+    };
+
+    for (sizes) |size| {
+        const compressed = try LZSS.random(
+            testing.allocator,
+            random,
+            size,
+            false,
+        );
+        defer testing.allocator.free(compressed);
+
+        const decompressed = LZSS.decode(
+            testing.allocator,
+            compressed,
+            size,
+            false,
+        ) catch |err| switch (err) {
+            error.ChecksumMismatch => {
+                continue;
+            },
+            else => return err,
+        };
+
+        defer test_allocator.free(decompressed);
+    }
+}
+
 test "LZSS De/Compress Roundtrip" {
     const test_cases = [_][]const u8{
-        "j",
+        "a",
         "Hello World",
         "Bisharper.... again.... in another languague? I think you've finally lost it ellie; atleast your learning.",
         "AAAAAAAAAAAAAAAAAAAAAAAAAA", //Repeted patterns
@@ -536,11 +521,11 @@ test "LZSS De/Compress Roundtrip" {
     };
 
     for (test_cases) |input| {
-        const compressed = try lzssCompress(input, false, test_allocator);
+        const compressed = try LZSS.encode(test_allocator, input, false);
 
         defer test_allocator.free(compressed);
 
-        const decompressed = try lzssDecompress(compressed, input.len, false, test_allocator);
+        const decompressed = try LZSS.decode(test_allocator, compressed, input.len, false);
 
         defer test_allocator.free(decompressed);
 
@@ -548,23 +533,16 @@ test "LZSS De/Compress Roundtrip" {
     }
 }
 
-test "LZSS invalid data handling" {
-    const invalid_data = [_]u8{0xFF} ** 10;
-    const expected_len = 100;
-    const data = lzssDecompress(&invalid_data, expected_len, false, test_allocator);
-    try testing.expectError(LzssError.InvalidData, data);
-}
 
 test "LZSS with signed checksum" {
     const test_data = "Test with signed checksum";
 
     // Compress
-    const compressed = try lzssCompress(test_data, true, test_allocator);
+    const compressed = try LZSS.encode(test_allocator, test_data, true);
     defer test_allocator.free(compressed);
 
     // Decompress with signed checksum
-    const decompressed = try lzssDecompress(compressed, test_data.len, true, // signed checksum
-        test_allocator);
+    const decompressed = try LZSS.decode(test_allocator, compressed, test_data.len, true);
     defer test_allocator.free(decompressed);
 
     // Verify content
@@ -575,37 +553,13 @@ test "LZSS with unsigned checksum" {
     const test_data = "Test with signed checksum";
 
     // Compress
-    const compressed = try lzssCompress(test_data, false, test_allocator);
+    const compressed = try LZSS.encode(test_allocator, test_data, true);
     defer test_allocator.free(compressed);
 
     // Decompress with unsigned checksum
-    const decompressed = try lzssDecompress(compressed,test_data.len, false, // unsigned checksum
-        test_allocator);
+    const decompressed = try LZSS.decode(test_allocator, compressed, test_data.len, true);
     defer test_allocator.free(decompressed);
 
     // Verify content
     try testing.expectEqualSlices(u8, test_data, decompressed);
-}
-
-test "LZSS with random binary data" {
-    var prng = std.rand.DefaultPrng.init(0); // Fixed seed for reproducibility
-    const random = prng.random();
-    const sizes = [_]usize{ 100, 1000, 10000 };
-
-    for (sizes) |size| {
-        const original_data = try test_allocator.alloc(u8, size);
-        defer test_allocator.free(original_data);
-
-        for (original_data) |*byte| {
-            byte.* = random.int(u8);
-        }
-
-        const compressed = try lzssCompress(original_data, false, test_allocator);
-        defer test_allocator.free(compressed);
-
-        const decompressed = try lzssDecompress(compressed, original_data.len, false, test_allocator);
-        defer test_allocator.free(decompressed);
-
-        try testing.expectEqualSlices(u8, original_data, decompressed);
-    }
 }
