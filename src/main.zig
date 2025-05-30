@@ -2,15 +2,30 @@ const std = @import("std");
 const bisharper = @import("bisharper.zig");
 
 pub fn main() !void {
-    //
-    // // stdout is for the actual output of your application, for example if you
-    // // are implementing gzip, then only the compressed bytes should be sent to
-    // // stdout, not any debugging messages.
-    // const stdout_file = std.io.getStdOut().writer();
-    // var bw = std.io.bufferedWriter(stdout_file);
-    // const stdout = bw.writer();
-    //
-    // try stdout.print("All your {s} are belong to us.\n", .{bisharper.hi});
-    //
-    // try bw.flush(); // don't forget to flush!
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var prng = std.rand.DefaultPrng.init(5);
+    const rng = prng.random();
+    const random_data_size = 100 * 1024 * 1024; // 1 KB of random data
+
+    const compressed = try bisharper.Lzss.random(
+        allocator,
+        rng,
+        random_data_size,
+        false,
+    );
+    defer allocator.free(compressed);
+    try writeFile("compressed.bin", compressed);
+
+    const decompressed = try bisharper.Lzss.decode(allocator, compressed, random_data_size, false);
+    defer allocator.free(decompressed);
+    try writeFile("decompressed.bin", decompressed);
+}
+fn writeFile(filename: []const u8, data: []const u8) !void {
+    const file = try std.fs.cwd().createFile(filename, .{});
+    defer file.close();
+
+    try file.writeAll(data);
 }

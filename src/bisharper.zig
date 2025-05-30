@@ -1,5 +1,4 @@
 const std = @import("std");
-
 pub const Lzss = struct {
     const N: i32 = 0x1000;
     const FILL: u8 = 0x20;
@@ -356,7 +355,7 @@ pub const Lzss = struct {
         const MAX_MATCH: i32 = F;
         const MATCH_PROB: f32 = 0.3; //Directly correlates to entropy
         //very liberal with size here we could probably get a lower higher bound
-        const max_size =  expected_output_size * 2 + 8;
+        const max_size =  if (expected_output_size == 0) 4 else expected_output_size * 2 + 8;
         var buffer = try allocator.alloc(u8, if (expected_output_size == 0) 4 else max_size);
         errdefer allocator.free(buffer);
 
@@ -371,7 +370,6 @@ pub const Lzss = struct {
         var idx: usize = 0;
         while (decomp < expected_output_size) {
             const flag_idx = idx;
-            buffer[idx] = 0;
             idx += 1;
             var flag: u8 = 0;
             var ops_in_this_block: u4 = 0;
@@ -389,7 +387,7 @@ pub const Lzss = struct {
                     buffer[idx] = next;
                     idx += 1;
                     text_buf[r] = next;
-                    r = (r + 1) % N;
+                    r = (r + 1) & (N - 1);
                     csum = incrementChecksum(csum, next, signed_checksum);
 
                     break :blk 1;
@@ -400,22 +398,23 @@ pub const Lzss = struct {
                         @min(MAX_MATCH, remaining),
                     );
 
-                    const length_code: u4 = @intCast(out_len - MATCH_THRESHOLD - 1);
-                    std.debug.assert(length_code <= 15);
+                    const length_code: u4 = @intCast(out_len - MIN_MATCH);
+                    std.debug.assert(length_code <= (MAX_MATCH - MIN_MATCH) and length_code <= 0x0F);
 
-                    const offset: u12 = @intCast(rng.intRangeAtMost(usize, 0, N - 1));
+                    const source_abs: u12 = @truncate(rng.intRangeAtMost(usize, 0, N - 1));
+                    const offset_val: u12 = @truncate((r -% source_abs) & (N - 1));
 
-                    buffer[idx] = @truncate(offset);
+                    buffer[idx] = @truncate(offset_val);
                     idx += 1;
-                    buffer[idx] = (@as(u8, @truncate(offset >> 8)) << 4) | length_code;
+                    buffer[idx] = (@as(u8, @truncate(offset_val >> 8)) << 4) | length_code;
                     idx += 1;
 
                     for (0..out_len) |i| {
-                        const c = text_buf[(@as(usize, offset) + i) % N];
+                        const c = text_buf[(source_abs + i) & (N - 1)];
 
                         csum = incrementChecksum(csum, c, signed_checksum);
                         text_buf[r] = c;
-                        r = (r + 1) % N;
+                        r = (r + 1) & (N - 1);
                     }
 
                     break :blk out_len;
@@ -424,15 +423,13 @@ pub const Lzss = struct {
             }
 
             if (ops_in_this_block == 0) {
-                std.debug.assert(idx == flag + 1);
-                idx -= 1;
+                idx = flag_idx;
             } else {
                 buffer[flag_idx] = flag;
             }
         }
-        const checksum_bytes = @as([*]const u8, @ptrCast(&csum))[0..@sizeOf(i32)];
-        @memcpy(buffer[idx..idx + @sizeOf(i32)], checksum_bytes);
-        idx += @sizeOf(i32);
+        std.mem.writeInt(i32, buffer[idx .. idx + 4][0..4],csum, .little);
+        idx += 4;
 
         return try allocator.realloc(buffer, idx);
     }
