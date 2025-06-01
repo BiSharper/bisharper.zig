@@ -1,10 +1,11 @@
 const std = @import("std");
 const bisharper = @import("bisharper.zig");
-
+lol: i32,
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
 
     var prng = std.rand.DefaultPrng.init(5);
     const rng = prng.random();

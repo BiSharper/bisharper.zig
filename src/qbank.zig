@@ -1,91 +1,91 @@
 const std = @import("std");
+pub const CWrapper = extern struct {
+    inner: ?*BankFile,
+    success: u8,
 
-pub const Bank = struct {
-    pub const CWrapper = extern struct {
-        inner: ?*Bank,
-        success: u8,
-
-        pub fn deinit(self: *CWrapper) void {
-            if(self.inner) |inner| {
-                inner.deinit();
-                inner.allocator.destroy(inner);
-            }
+    pub fn deinit(self: *CWrapper) void {
+        if(self.inner) |inner| {
+            inner.deinit();
+            inner.allocator.destroy(inner);
         }
-    };
+    }
+};
 
-    pub const Mime = union(enum) {
-        const DECOMPRESSED: i32 = 0x00000000;
-        const COMPRESSED: i32 = 0x43707273;
-        const ENCRYPTED: i32 = 0x456e6372;
-        const VERSION: i32 = 0x56657273;
-        Version: void,
-        Decompressed: void,
-        Compressed: void,
-        Encrypted: void,
-        Other: i32,
+pub const Mime = union(enum) {
+    const DECOMPRESSED: i32 = 0x00000000;
+    const COMPRESSED: i32 = 0x43707273;
+    const ENCRYPTED: i32 = 0x456e6372;
+    const VERSION: i32 = 0x56657273;
+    Version: void,
+    Decompressed: void,
+    Compressed: void,
+    Encrypted: void,
+    Other: i32,
 
-        pub fn default() Mime {
-            return .Decompressed;
+    pub fn default() Mime {
+        return .Decompressed;
+    }
+
+    pub fn format(
+        self: Mime,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        switch (self) {
+            .Version => try writer.writeAll("Version"),
+            .Decompressed => try writer.writeAll("Decompressed"),
+            .Compressed => try writer.writeAll("Compressed"),
+            .Encrypted => try writer.writeAll("Encrypted"),
+            .Other => |unknown| try std.fmt.format(writer, "Unknown ({x:0>8})", .{unknown}),
         }
+    }
 
-        pub fn format(
-            self: Mime,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = fmt;
-            _ = options;
-            switch (self) {
-                .Version => try writer.writeAll("Version"),
-                .Decompressed => try writer.writeAll("Decompressed"),
-                .Compressed => try writer.writeAll("Compressed"),
-                .Encrypted => try writer.writeAll("Encrypted"),
-                .Other => |unknown| try std.fmt.format(writer, "Unknown ({x:0>8})", .{unknown}),
-            }
-        }
+    pub fn toInt(self: Mime) i32 {
+        return switch (self) {
+            .Version => VERSION,
+            .Decompressed => DECOMPRESSED,
+            .Compressed => COMPRESSED,
+            .Encrypted => ENCRYPTED,
+            .Other => |unknown| unknown,
+        };
+    }
 
-        pub fn toInt(self: Mime) i32 {
-            return switch (self) {
-                .Version => VERSION,
-                .Decompressed => DECOMPRESSED,
-                .Compressed => COMPRESSED,
-                .Encrypted => ENCRYPTED,
-                .Other => |unknown| unknown,
-            };
-        }
+    pub fn fromInt(value: i32) Mime {
+        return switch (value) {
+            DECOMPRESSED => .Decompressed,
+            COMPRESSED => .Compressed,
+            ENCRYPTED => .Encrypted,
+            VERSION => .Version,
+            else => .{ .Other = value },
+        };
+    }
+};
 
-        pub fn fromInt(value: i32) Mime {
-            return switch (value) {
-                DECOMPRESSED => .Decompressed,
-                COMPRESSED => .Compressed,
-                ENCRYPTED => .Encrypted,
-                VERSION => .Version,
-                else => .{ .Other = value },
-            };
-        }
-    };
+pub const Meta = struct {
+    mime: Mime,
+    size_ext: u32,
+    offset: u32,
+    time: u32,
+    size_int: u32,
 
-    pub const Meta = struct {
-        mime: Mime,
-        size_ext: u32,
-        offset: u32,
-        time: u32,
-        size_int: u32,
+    pub fn isVersion(self: Meta) bool {
+        return self.mime == .Version and self.size_int == 0 and self.time == 0;
+    }
 
-        pub fn isVersion(self: Meta) bool {
-            return self.mime == .Version and self.size_int == 0 and self.time == 0;
-        }
+    pub fn isEnd(self: Meta) bool {
+        return self.mime == .Decompressed
+            and self.size_ext == 0
+            and self.offset == 0
+            and self.size_int == 0
+            and self.time == 0;
 
-        pub fn isEnd(self: Meta) bool {
-            return self.mime == .Decompressed
-                and self.size_ext == 0
-                and self.offset == 0
-                and self.size_int == 0
-                and self.time == 0;
+    }
+};
 
-        }
-    };
+pub const BankFile = struct {
 
     pub const Data = union(enum) {
         Uninitialized: u64,
@@ -130,7 +130,7 @@ pub const Bank = struct {
         Open
     };
 
-    const PREFIX_PROP_NAME = "prefix";
+    pub const PREFIX_PROP_NAME = "prefix";
 
     allocator: std.mem.Allocator,
     properties: std.StringHashMap([]const u8),
@@ -173,7 +173,7 @@ pub const Bank = struct {
         path:      ?[]const u8,
         options:   ReadOptions,
         allocator: std.mem.Allocator,
-    ) !Bank {
+    ) !BankFile {
         var self = try init(prefix, allocator);
         errdefer self.deinit();
 
@@ -273,7 +273,7 @@ pub const Bank = struct {
     pub fn init(
         prefix: []const u8,
         allocator: std.mem.Allocator,
-    ) !Bank {
+    ) !BankFile {
         const prefix_copy = try ensureTrailingSlash(prefix, allocator);
         errdefer allocator.free(prefix_copy);
 
@@ -298,7 +298,7 @@ pub const Bank = struct {
         };
     }
 
-    pub fn deinit(self: *Bank) void {
+    pub fn deinit(self: *BankFile) void {
         var prop_it = self.properties.iterator();
         while (prop_it.next()) |entry| {
             self.allocator.free(entry.value_ptr.*);
