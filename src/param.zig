@@ -12,118 +12,149 @@ pub const ParamDatabase = struct {
     allocator:  std.mem.Allocator,
     sources:    std.ArrayList(MonolithicSource),
     context:    ParamContext,
-    
-    pub const ParamContext = struct {
-        database:   *ParamDatabase,
-        access:     ParamAccess,
-        parameters: std.StringHashMap(PolylithicValue),
-        classes:    std.StringHashMap(ParamContext),
-        pub fn addSource(self: *ParamContext, statements: *[]MonolithicParam.Statement, alloc: std.mem.Allocator) !void {
-            for (statements) | statement | {
-                switch (statement) {
-                    .delete      => | target | {
-                        if (self.access >= ParamAccess.ReadCreate) {
-                            std.debug.print(
-                                "Cannot delete {} in current context. The accesss is restricted",
-                                .{target}
-                            );
-                            return error.InvalidAccess;
-                        }
-                        //todo lets delete that target
-                    },
-                    .exec        => | _ | {
-                        std.debug.print("Exec not implemented");
-                        return error.NotImplemented; //todo: wayy too much work right now
-                    },
-                    .external    => | _ | return error.NotImplemented,
-                    .class       => | class | try self.addSource(class, alloc),
-                    .param       => | parameter | {
-                        if (self.access >= ParamAccess.ReadOnly) {
-                            std.debug.print(
-                                "Cannot add {} in current context. The accesss is restricted",
-                                .{parameter.name}
-                            );
-                            return error.InvalidAccess;
-                        }
 
-                        switch (parameter.op) {
-                            .Assign => {
-                                const name = self.database.allocator.dupe(u8,  parameter.name.*) catch unreachable;
-                                alloc.free(parameter.name);
-                                parameter.name = &name;
 
-                                self.context.parameters.put(name, switch (parameter.val) {
-
-                                });
-                            },
-                            .AddAssign => return error.NotImplemented,
-                            .SubAssign => return error.NotImplemented
-
-                        }
-                    },
-                    .enumerable  => | _ | return error.NotImplemented,
-                }
-            }
-        }
-
-    };
-    
     pub const ParamOwner = union {
         ast: MonolithicSource,
         programatic: void,
     };
 
-    //arrays inside of arrays shouldnt have owners since you can only add or remove to the param not its inner arrays
-    //We can conserve space by making another array type maybe but this will be done later; for now this is fine.
     pub const PolylithicValue = struct {
         value: Value,
         owner: ParamOwner,
 
         pub const Value = union {
-            array:  std.ArrayList(PolylithicValue),
-            string: []u8,
-            i64:    i64,
-            i32:    i32,
-            f32:    f32,
-        };
-    };
-
-    pub fn addSource(self: *ParamDatabase, ast: *MonolithicParam, diag: bool) !void {
-        const source = if (diag) MonolithicSource {
-            .diag = &ast,
-        } else MonolithicSource {
-            .file = &ast.file
+            array:      std.ArrayList(PolylithicValue),
+            nest_array: std.ArrayList(Value),
+            string:     []u8,
+            i64:        i64,
+            i32:        i32,
+            f32:        f32,
         };
 
-        try self.sources.append(source);
-
-        for (ast.statements) | statement | {
-            switch (statement) {
-                .exec => {
-                    return error.NotImplemented;
+        pub fn deinit(self: *PolylithicValue, allocator: std.mem.Allocator) void {
+            switch (self.value) {
+                .array => |*arr| {
+                    for (arr.items) |*item| item.deinit(allocator);
+                    arr.deinit();
                 },
-                .external => {
-                    return error.NotImplemented;
-                },
-                .class => {
-                    return error.NotImplemented;
-                },
-                .param => {
-                    return error.NotImplemented;
-                },
-                .enumerable => {
-                    return error.NotImplemented;
-                }
+                .string => |str| allocator.free(str),
+                .i64, .i32, .f32 => {},
             }
         }
+    };
+
+    pub const ParamContext = struct {
+        database:   *ParamDatabase,
+        access:     ParamAccess,
+        parameters: std.StringHashMap(PolylithicValue),
+        classes:    std.StringHashMap(ParamContext),
+        base:       ?*ParamContext,
+
+        fn addParam(self: *ParamContext, ast: *MonolithicParam.Parameter, alloc: std.mem.Allocator) !void {
+            if (self.access >= ParamAccess.ReadOnly) {
+                std.debug.print(
+                    "Cannot add {} in current context. The accesss is restricted",
+                    .{ast.name}
+                );
+                return error.InvalidAccess;
+            }
+
+            if (self.parameters.get(ast.name.*)) | existing | {
+                if(self.access >= ParamAccess.ReadCreate) {
+                    std.debug.print(
+                        "Cannot update {} in current context. The accesss is restricted",
+                        .{ast.name}
+                    );
+                    return error.InvalidAccess;
+                }
+
+                self.parameters.removeByPtr(ast.name.*);
+                existing.deinit(alloc);
+            }
+
+            //TODO: We need to add our value now. Conversion is annoying to write so do this later
+
+        }
+
+        fn getClass(self: *ParamContext, name: []u8) ?*ParamContext {
+            if (self.classes.get(name)) |*context| {
+                return context;
+            }
+
+            return null;
+        }
+
+        fn addClass(self: *ParamContext, ast: *MonolithicParam.Class, alloc: std.mem.Allocator) !void {
+            if(self.access >= ParamAccess.ReadOnly) {
+                std.debug.print(
+                    "Cannot add {} in current context. The accesss is restricted",
+                    .{ast.name}
+                );
+                return error.InvalidAccess;
+            }
+
+            const context: ParamContext = blk: {
+                if (self.classes.get(ast.name.*)) |existing| {
+                    break :blk existing;
+                } else {
+
+                    const base: ?*ParamContext = if (ast.base.*) |baseName| self.getClass(baseName) else null;
+                    if(ast.base and !base) {
+                        std.debug.print(
+                            "Undefined base class {}",
+                            .{ast.base.?}
+                        );
+                        return error.UndefinedBase;
+                    }
+
+                    const newContext = ParamContext{
+                        .database = &self.database,
+                        .access = ParamAccess.Default,
+                        .parameters = std.StringHashMap(PolylithicValue).init(self.database.allocator),
+                        .classes = std.StringHashMap(ParamContext).init(self.database.allocator),
+                        .base = base
+                    };
+
+                    try self.classes.put(ast.name.*, newContext);
+
+                    break :blk newContext;
+                }
+            };
+
+            _ = context;
+            _ = alloc;
+
+        }
+
+        pub fn addSource(self: *ParamContext, ast: *MonolithicParam, diag: bool) !void {
+            const source = if (diag) MonolithicSource {
+                .diag = &ast,
+            } else MonolithicSource {
+                .file = &ast.file
+            };
+
+            try self.database.sources.append(source);
+
+            for (ast.statements) | statement | {
+                switch (statement) {
+                    .exec => return error.NotImplemented,
+                    .external => return error.NotImplemented,
+                    .class => | class | try self.addClass(class, ast.allocator),
+                    .param => | param | try self.addParam(param, ast.allocator),
+                    .enumerable => return error.NotImplemented
+                }
+            }
 
 
-        // if(diag) { //free all the stuff we dont really need
-        //
-        // }
-    }
+            // if(diag) { //free all the stuff we dont really need
+            //
+            // }
+        }
 
+    };
 };
+
 
 pub const MonolithicSource = union {
     diag: *MonolithicParam,
