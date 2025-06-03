@@ -8,109 +8,132 @@ pub const ParamAccess = enum(i3) {
     ReadOnlyVerified = 3
 };
 
+pub const ParamDatabase = struct {
+    allocator:  std.mem.Allocator,
+    sources:    std.ArrayList(MonolithicSource),
+    context:    ParamContext,
+    
+    pub const ParamContext = struct {
+        database:   *ParamDatabase,
+        access:     ParamAccess,
+        parameters: std.StringHashMap(PolylithicValue),
+        classes:    std.StringHashMap(ParamContext),
+        pub fn addSource(self: *ParamContext, statements: *[]MonolithicParam.Statement, alloc: std.mem.Allocator) !void {
+            for (statements) | statement | {
+                switch (statement) {
+                    .delete      => | target | {
+                        if (self.access >= ParamAccess.ReadCreate) {
+                            std.debug.print(
+                                "Cannot delete {} in current context. The accesss is restricted",
+                                .{target}
+                            );
+                            return error.InvalidAccess;
+                        }
+                        //todo lets delete that target
+                    },
+                    .exec        => | _ | {
+                        std.debug.print("Exec not implemented");
+                        return error.NotImplemented; //todo: wayy too much work right now
+                    },
+                    .external    => | _ | return error.NotImplemented,
+                    .class       => | class | try self.addSource(class, alloc),
+                    .param       => | parameter | {
+                        if (self.access >= ParamAccess.ReadOnly) {
+                            std.debug.print(
+                                "Cannot add {} in current context. The accesss is restricted",
+                                .{parameter.name}
+                            );
+                            return error.InvalidAccess;
+                        }
 
-pub const ParamValue = struct {
-    pub const ValueType =  union {
-        array: std.ArrayList(ParamValue),
-        str:   []u8,
-        i64:   i64,
-        i32:   i32,
-        f32:   f32,
-        expr:  []u8,
+                        switch (parameter.op) {
+                            .Assign => {
+                                const name = self.database.allocator.dupe(u8,  parameter.name.*) catch unreachable;
+                                alloc.free(parameter.name);
+                                parameter.name = &name;
 
-        fn deinit(self: *ValueType, allocator: std.mem.Allocator) void {
-            switch (self) {
-                .array => |arr| {
-                    for (arr.items) |val| val.deinit(allocator);
-                    arr.deinit();
-                },
-                .str => |str| allocator.free(str),
-                .expr => |expr| allocator.free(expr),
-                else => {},
+                                self.context.parameters.put(name, switch (parameter.val) {
+
+                                });
+                            },
+                            .AddAssign => return error.NotImplemented,
+                            .SubAssign => return error.NotImplemented
+
+                        }
+                    },
+                    .enumerable  => | _ | return error.NotImplemented,
+                }
             }
         }
+
     };
-    owner: ParamOwner,
-    value: *ValueType,
+    
+    pub const ParamOwner = union {
+        ast: MonolithicSource,
+        programatic: void,
+    };
 
-    // if AST points to ValueType in ast struct, if programatic points to value in heap
-    fn deinit(self: *ParamValue, allocator: std.mem.Allocator) void {
-        if(self.owner == .Programatic) {
-            self.value.deinit(allocator);
-            allocator.free(self.value);
+    //arrays inside of arrays shouldnt have owners since you can only add or remove to the param not its inner arrays
+    //We can conserve space by making another array type maybe but this will be done later; for now this is fine.
+    pub const PolylithicValue = struct {
+        value: Value,
+        owner: ParamOwner,
+
+        pub const Value = union {
+            array:  std.ArrayList(PolylithicValue),
+            string: []u8,
+            i64:    i64,
+            i32:    i32,
+            f32:    f32,
+        };
+    };
+
+    pub fn addSource(self: *ParamDatabase, ast: *MonolithicParam, diag: bool) !void {
+        const source = if (diag) MonolithicSource {
+            .diag = &ast,
+        } else MonolithicSource {
+            .file = &ast.file
+        };
+
+        try self.sources.append(source);
+
+        for (ast.statements) | statement | {
+            switch (statement) {
+                .exec => {
+                    return error.NotImplemented;
+                },
+                .external => {
+                    return error.NotImplemented;
+                },
+                .class => {
+                    return error.NotImplemented;
+                },
+                .param => {
+                    return error.NotImplemented;
+                },
+                .enumerable => {
+                    return error.NotImplemented;
+                }
+            }
         }
+
+
+        // if(diag) { //free all the stuff we dont really need
+        //
+        // }
     }
+
 };
 
-pub const ParamOwner = union {
-    AST:          *ParamAST,
-    Programatic:  void
+pub const MonolithicSource = union {
+    diag: *MonolithicParam,
+    file: *[]u8,
 };
 
-pub const ParamClass = struct {
-    const ACCESS_PARAM = "access";
-    name:    []u8,
-    access:  ParamAccess,
-    classes: std.StringHashMap(ParamClass),
-    params:  std.StringHashMap(ParamValue),
-    owner:   ParamOwner,
-    root:    *ParamFile,
-    parent:  ?*ParamClass,
-    ast:     std.ArrayList(ParamAST),
-
-
-    pub fn pushAST(self: *ParamClass, ast: ParamAST) !void {
-        const allocator = self.root.alloc;
-        if(ast.allocator != allocator) try ast.realloc(allocator);
-
-        //todo
-
-        try self.ast.append(ast);
-    }
-    //
-    // pub fn pushParam(comptime realloc: bool) !void {
-    //
-    // }
-
-    pub fn deinit(self: *ParamClass) void {
-        const allocator = self.root.alloc;
-        allocator.free(self.name);
-
-        for (self.classes.keyIterator(), self.classes.valueIterator()) |key, *value| {
-            allocator.free(key);
-            value.deinit(allocator);
-        }
-        self.classes.deinit();
-
-        for (self.params.keyIterator(), self.params.valueIterator()) |key, *value| {
-            allocator.free(key);
-            value.deinit(allocator);
-        }
-        self.params.deinit();
-
-        for (self.ast.items) |ast| ast.deinit();
-        self.ast.deinit();
-    }
-};
-
-pub const ParamFile = struct {
-    pub usingnamespace ParamClass;
-
-    inner:  ParamClass,
-    alloc:  std.mem.Allocator,
-
-    pub fn class(self: *ParamFile) *ParamClass {
-        return &self.inner;
-    }
-
-    pub fn deinit(self: *ParamFile) void {
-        self.deinit(self.class(), self.alloc);
-    }
-};
-
-pub const ParamAST = struct {
+pub const MonolithicParam = struct {
     allocator:  std.mem.Allocator,
     statements: []Statement,
+    file:       []u8,
 
     pub const Operator = enum {
         Assign,
@@ -118,129 +141,34 @@ pub const ParamAST = struct {
         SubAssign,
     };
 
+    pub const Value = union(enum) {
+        array: []*Value,
+        str:   []u8,
+        i64:   *i64,
+        i32:   *i32,
+        f32:   *f32,
+        expr:  *[]u8,
+    };
+
     pub const Parameter = struct {
-        name:  []u8,
+        name:  *[]u8,
         op:    Operator,
-        val:   ParamValue.ValueType,
-
-        fn deinit(self: *Parameter, allocator: std.mem.Allocator) void {
-            allocator.free(self.name);
-            self.val.deinit(allocator);
-        }
-
-        fn realloc(self: *Parameter, old_allocator: std.mem.Allocator, new_allocator: std.mem.Allocator) !void {
-            const new_name = try new_allocator.dupe(u8, self.name);
-            old_allocator.free(self.name);
-            self.name = new_name;
-            try self.val.realloc(old_allocator, new_allocator);
-        }
+        val:   Value,
     };
 
     pub const Statement = union {
-        delete:     []u8,
-        exec:       []u8,
-        external:   []u8,
+        delete:     *[]u8, 
+        exec:       *[]u8,
+        external:   *[]u8,
         class:      Class,
         param:      Parameter,
         enumerable: std.StringHashMap(f32),
-
-        fn deinit(self: *Statement, allocator: std.mem.Allocator) void {
-            switch (self.*) {
-                .delete => |del| allocator.free(del),
-                .exec => |exec| allocator.free(exec),
-                .external => |ext| allocator.free(ext),
-                .param => |*param| param.deinit(allocator),
-                .enumerable => |*enum_map| {
-                    for (enum_map.keys()) |key| allocator.free(key);
-                    enum_map.deinit();
-                },
-                .class => |*class| class.deinit(allocator)
-            }
-        }
-        fn realloc(self: *Statement, old_allocator: std.mem.Allocator, new_allocator: std.mem.Allocator) !void {
-            switch (self.*) {
-                .delete => |del| {
-                    const new_del = try new_allocator.dupe(u8, del);
-                    old_allocator.free(del);
-                    self.delete = new_del;
-                },
-                .exec => |exec| {
-                    const new_exec = try new_allocator.dupe(u8, exec);
-                    old_allocator.free(exec);
-                    self.exec = new_exec;
-                },
-                .external => |ext| {
-                    const new_ext = try new_allocator.dupe(u8, ext);
-                    old_allocator.free(ext);
-                    self.external = new_ext;
-                },
-                .param => |*param| try param.realloc(old_allocator, new_allocator),
-                .enumerable => |*enum_map| {
-                    var new_enum_map = std.StringHashMap(f32).init(new_allocator);
-
-                    for (enum_map.keyIterator(), enum_map.valueIterator()) |key, value| {
-                        const new_key = try new_allocator.dupe(u8, key);
-                        try new_enum_map.put(new_key, value);
-                    }
-
-                    enum_map.deinit();
-                    self.enumerable = new_enum_map;
-                },
-                .class => |*class| try class.realloc(old_allocator, new_allocator)
-            }
-
-        }
     };
 
     pub const Class = struct {
-        name:       []u8,
-        base:       ?[]u8,
+        name:       *[]u8,
+        base:       *?[]u8,
         statements: []Statement,
-
-        fn deinit(self: *Class, allocator: std.mem.Allocator) void {
-            allocator.free(self.name);
-            if (self.base) |base| allocator.free(base);
-            for (self.statements) |stmt| stmt.deinit(allocator);
-        }
-
-        fn realloc(self: *Class, old_allocator: std.mem.Allocator, new_allocator: std.mem.Allocator) !void {
-            const new_name = try new_allocator.dupe(u8, self.name);
-            old_allocator.free(self.name);
-            self.name = new_name;
-
-            if (self.base) |base| {
-                const new_base = try new_allocator.dupe(u8, base);
-                old_allocator.free(base);
-                self.base = new_base;
-            }
-
-            var new_statements = try new_allocator.alloc(Statement, self.statements.len);
-            for (self.statements, 0..) |*statement, i| {
-                try statement.realloc(old_allocator, new_allocator);
-                new_statements[i] = statement.*;
-            }
-            old_allocator.free(self.statements);
-            self.statements = new_statements;
-        }
     };
 
-
-    pub fn realloc(self: *ParamAST, allocator: std.mem.Allocator) void {
-        if (self.allocator == allocator) {
-            return;
-        }
-        var new_statements = try allocator.alloc(Statement, self.statements.len);
-        for (self.statements, 0..) |*statement, i| {
-            try statement.realloc(self.allocator, allocator);
-            new_statements[i] = statement.*;
-        }
-        self.allocator.free(self.statements);
-        self.statements = new_statements;
-        self.allocator = allocator;
-
-    }
-
-    pub fn deinit(self: *ParamAST) void {
-        for (self.statements) |statement| statement.deinit(self.allocator);
-    }
 };
