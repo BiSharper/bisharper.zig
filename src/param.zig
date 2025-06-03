@@ -15,7 +15,7 @@ pub const ParamDatabase = struct {
     };
 
     pub const Owner = union {
-        ast: MonolithicParam.Source,
+        ast: *MonolithicParam.Source,
         programatic: void,
     };
 
@@ -53,7 +53,7 @@ pub const ParamDatabase = struct {
     };
 
     pub const Context = struct {
-        name:       *[]u8,
+        name:       []u8,
         database:   *ParamDatabase,
         access:     Access,
         parameters: std.StringHashMap(Value),
@@ -61,6 +61,7 @@ pub const ParamDatabase = struct {
         base:       ?*Context,
         parent:     ?*Context,
         children:   i32,
+        owner: Owner,
 
 
         pub fn getClass(self: *Context, name: []u8) ?*Context {
@@ -75,17 +76,17 @@ pub const ParamDatabase = struct {
             const source = if (diag) MonolithicParam.Source {
                 .diag = &ast,
             } else MonolithicParam.Source {
-                .file = &ast.file
+                .file = ast.file
             };
 
             try self.database.sources.append(source);
-            try self.addStatements(ast.statements, self.database.allocator);
+            try self.addStatements(ast.statements, &source);
         }
 
         pub fn deinit(self: *Context) void {
             const alloc = self.database.allocator;
 
-            alloc.free(self.name.*);
+            alloc.free(self.name);
 
             var parameter_iterator = self.parameters.iterator();
             while (parameter_iterator.next()) |entry| {
@@ -108,8 +109,7 @@ pub const ParamDatabase = struct {
             self.classes.deinit();
         }
 
-        //TODO FIXME
-        fn addParam(self: *Context, ast: *MonolithicParam.Parameter) !void {
+        fn addParam(self: *Context, ast: *MonolithicParam.Parameter, source: *MonolithicParam.Source) !void {
             if (self.access >= Access.ReadOnly) {
                 std.debug.print(
                     "Cannot add {} in current context. The accesss is restricted",
@@ -117,25 +117,57 @@ pub const ParamDatabase = struct {
                 );
                 return error.InvalidAccess;
             }
+            const alloc = self.database.allocator;
 
-            if (self.parameters.get(ast.name.*)) | existing | {
-                if(self.access >= Access.ReadCreate) {
-                    std.debug.print(
-                        "Cannot update {} in current context. The accesss is restricted",
-                        .{ast.name}
-                    );
-                    return error.InvalidAccess;
+            switch (ast.op) {
+                .Assign => {
+                    if (self.parameters.get(ast.name.*)) | existing | {
+                        if(self.access >= Access.ReadCreate) {
+                            std.debug.print(
+                                "Cannot update {} in current context. The accesss is restricted",
+                                .{ast.name}
+                            );
+                            return error.InvalidAccess;
+                        }
+
+                        self.parameters.removeByPtr(ast.name.*);
+                        existing.deinit(alloc);
+                    }
+                    const nameCopy = try alloc.dupe(u8, ast.name.*);
+                    const value: Value = undefined; //todo
+                    self.parameters.put(nameCopy, value);
+                },
+                .AddAssign => {
+                    const array = try self.getOrCreateArray(ast.name, source);
+                    _ = array;
+                    //Lets add here
+                },
+                .SubAssign => {
+                    const array = try self.getOrCreateArray(ast.name, source);
+                    _ = array;
+                    //Lets sub here
                 }
-
-                self.parameters.removeByPtr(ast.name.*);
-                existing.deinit(self.database.allocator);
             }
-
-            //TODO: We need to add our value now. Conversion is annoying to write so do this later
-
         }
 
-        fn addExternal(self: *Context, name: *[]u8) !void {
+        fn getOrCreateArray(self: *Context, name: []const u8, source: *MonolithicParam.Source) !*Value {
+            if (self.parameters.getPtr(name)) | array | {
+                return array;
+            }
+            const newArray = Value {
+                .owner = Owner {
+                    .ast = &source
+                },
+                .value = Value.ValueType {
+                    .array = std.ArrayList(Value).init(self.database.allocator)
+                }
+            };
+            const nameCopy = try self.database.allocator.dupe(u8, name);
+            self.parameters.put(nameCopy, newArray);
+            return self.parameters.getPtr(nameCopy);
+        }
+
+        fn addExternal(self: *Context, name: []const u8, source: *MonolithicParam.Source) !void {
             if(self.access >= Access.ReadOnly) {
                 std.debug.print(
                     "Cannot add {} in current context. The accesss is restricted",
@@ -154,12 +186,15 @@ pub const ParamDatabase = struct {
                     .parameters = std.StringHashMap(Value).init(alloc),
                     .classes = std.StringHashMap(Context).init(alloc),
                     .base = null,
-                    .name = &nameCopy
+                    .name = nameCopy,
+                    .owner = Owner {
+                        .ast = &source
+                    }
                 });
             }
         }
 
-        fn addClass(self: *Context, ast: *MonolithicParam.Class) !void {
+        fn addClass(self: *Context, ast: *MonolithicParam.Class, source: *MonolithicParam.Source) !void {
             if(self.access >= Access.ReadOnly) {
                 std.debug.print(
                     "Cannot add {} in current context. The accesss is restricted",
@@ -192,7 +227,10 @@ pub const ParamDatabase = struct {
                         .parameters = std.StringHashMap(Value).init(alloc),
                         .classes = std.StringHashMap(Context).init(alloc),
                         .base = base,
-                        .name = &nameCopy
+                        .name = nameCopy,
+                        .owner = Owner {
+                            .ast = &source
+                        }
                     };
                     self.children += 1;
                     try self.classes.put(nameCopy, newContext);
@@ -200,10 +238,10 @@ pub const ParamDatabase = struct {
                     break :blk newContext;
                 }
             };
-            try context.addStatements(ast.statements);
+            try context.addStatements(ast.statements, source);
         }
 
-        fn deleteClass(self: *Context, className: []u8) !void {
+        fn deleteClass(self: *Context, className: []const u8) !void {
             if(self.access >= Access.ReadOnly) {
                 std.debug.print(
                     "Cannot delete {} in current context. The accesss is restricted",
@@ -226,12 +264,12 @@ pub const ParamDatabase = struct {
             }
         }
 
-        fn addStatements(self: *Context, statements: []MonolithicParam.Statement) !void {
+        fn addStatements(self: *Context, statements: []const MonolithicParam.Statement, source: *MonolithicParam.Source) !void {
             for (statements) | statement | {
                 switch (statement) {
-                    .external   => | external | try self.addExternal(external),
-                    .class      => | class | try self.addClass(class),
-                    .param      => | param | try self.addParam(param),
+                    .external   => | external | try self.addExternal(external, source),
+                    .class      => | class | try self.addClass(class, source),
+                    .param      => | param | try self.addParam(param, source),
                     .delete     => | class | try self.deleteClass(class),
                     .exec       => return error.NotImplemented,
                     .enumerable => return error.NotImplemented
@@ -243,8 +281,8 @@ pub const ParamDatabase = struct {
 
 pub const MonolithicParam = struct {
     allocator:  std.mem.Allocator,
-    statements: []Statement,
-    file:       []u8,
+    statements: []const Statement,
+    file:       []const u8,
 
     pub const Operator = enum {
         Assign,
@@ -254,37 +292,42 @@ pub const MonolithicParam = struct {
 
     pub const Source = union {
         diag: *MonolithicParam,
-        file: *[]u8,
+        file: []const u8,
     };
 
     pub const Value = union(enum) {
-        array: []*Value,
-        str:   []u8,
-        i64:   *i64,
-        i32:   *i32,
-        f32:   *f32,
-        expr:  *[]u8,
+        array: []const Value,
+        str:   []const u8,
+        i64:   i64,
+        i32:   i32,
+        f32:   f32,
+        expr:  []const u8,
     };
 
     pub const Parameter = struct {
-        name:  *[]u8,
+        name:  []const u8,
         op:    Operator,
         val:   Value,
     };
 
     pub const Statement = union {
-        delete:     *[]u8, 
-        exec:       *[]u8,
-        external:   *[]u8,
+        delete:     []const u8,
+        exec:       []const u8,
+        external:   []const u8,
         class:      Class,
         param:      Parameter,
-        enumerable: std.StringHashMap(f32),
+        enumerable: []const EnumValue,
+    };
+
+    pub const EnumValue = struct {
+        name: []const u8,
+        value: f32
     };
 
     pub const Class = struct {
-        name:       *[]u8,
-        base:       *?[]u8,
-        statements: []Statement,
+        name:       []const u8,
+        base:       ?[]const u8,
+        statements: []const Statement,
     };
 
 };
