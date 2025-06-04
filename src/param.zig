@@ -325,7 +325,7 @@ pub const ParamDatabase = struct {
     pub fn deinit(self: *ParamDatabase) void {
         self.context.deinit();
         for (self.sources.items) |source| {
-            switch (source) {
+            switch (source.*) {
                 .diag => |diag| {
                     diag.release();
                     diag.deinit();
@@ -359,6 +359,29 @@ pub const MonolithicParam = struct {
         _ = self.references.fetchSub(1, .monotonic);
     }
 
+    pub fn read(allocator: Allocator, path: []const u8, text: []const u8, preproc: ParamPreproc) !MonolithicParam {
+        return ParamParser.parse(
+            allocator,
+            path,
+            try preproc.preprocess(allocator, path, text)
+        );
+    }
+
+    pub fn deinit(self: *MonolithicParam) void {
+        const refs = self.references.load(.monotonic);
+        if(refs > 1) {
+            std.debug.print(
+                "Cannot free {} in current context. It is being used for diagnostics in {} places",
+                .{self.file, refs}
+            );
+            return;
+        }
+
+        self.allocator.free(self.file);
+        for (self.statements) |*statement| statement.deinit(self.allocator);
+        self.allocator.free(self.statements);
+
+    }
     pub const Value = union(enum) {
         array: []const Value,
         str:   []const u8,
@@ -366,12 +389,29 @@ pub const MonolithicParam = struct {
         i32:   i32,
         f32:   f32,
         expr:  []const u8,
+
+        pub fn deinit(self: *Value, allocator: Allocator) void {
+            switch (self.*) {
+                .array => |arr| {
+                    for (arr) |*val| val.deinit(allocator);
+                    allocator.free(arr);
+                },
+                .str => |str| allocator.free(str),
+                .expr => |expr| allocator.free(expr),
+                else => {},
+            }
+        }
     };
 
     pub const Parameter = struct {
         name:  []const u8,
         op:    Operator,
         val:   Value,
+
+        pub fn deinit(self: *Parameter, allocator: Allocator) void {
+            allocator.free(self.name);
+            self.val.deinit(allocator);
+        }
     };
 
     pub const Statement = union {
@@ -381,26 +421,45 @@ pub const MonolithicParam = struct {
         class:      Class,
         param:      Parameter,
         enumerable: []const EnumValue,
+
+        pub fn deinit(self: *Statement, allocator: Allocator) void {
+            switch (self.*) {
+                .delete => |str| allocator.free(str),
+                .exec => |str| allocator.free(str),
+                .external => |str| allocator.free(str),
+                .class => |class| class.deinit(allocator),
+                .param => |param| param.deinit(allocator),
+                .enumerable => |enums| {
+                    for (enums) |*enum_val| enum_val.deinit(allocator);
+                    allocator.free(enums);
+                },
+            }
+
+        }
     };
 
     pub const EnumValue = struct {
         name: []const u8,
-        value: f32
+        value: f32,
+
+        pub fn deinit(self: *EnumValue, allocator: Allocator) void {
+            allocator.free(self.name);
+        }
     };
 
     pub const Class = struct {
         name:       []const u8,
         base:       ?[]const u8,
         statements: []const Statement,
+        pub fn deinit(self: *Class, allocator: Allocator) void {
+            allocator.free(self.name);
+            if (self.base) |base| allocator.free(base);
+
+            for (self.statements) |*statement| statement.deinit(allocator);
+        }
+
     };
 
-    pub fn read(allocator: Allocator, path: []const u8, text: []const u8, preproc: ParamPreproc) !MonolithicParam {
-        return ParamParser.parse(
-            allocator,
-            path,
-            try preproc.preprocess(allocator, path, text)
-        );
-    }
 };
 
 pub const ParamPreproc = struct {
