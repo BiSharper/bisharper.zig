@@ -20,7 +20,7 @@ pub const ParamDatabase = struct {
     };
 
     pub const Value = struct {
-        value: Value,
+        value: ValueType,
         owner: Owner,
 
         pub const ValueType = union {
@@ -109,6 +109,39 @@ pub const ParamDatabase = struct {
             self.classes.deinit();
         }
 
+        fn toValueType(alloc: std.mem.Allocator, astValue: MonolithicParam.Value, inArray: bool) !Value {
+            return switch (astValue) {
+                .string => |s| Value.ValueType{ .string = try alloc.dupe(u8, s) },
+                .i64 => |v| Value.ValueType{ .i64 = v },
+                .i32 => |v| Value.ValueType{ .i32 = v },
+                .f32 => |v| Value.ValueType{ .f32 = v },
+                .array =>| values | {
+                    if(inArray) {
+                        const innerArray = std.ArrayList(Value.ValueType).init(alloc);
+                        errdefer innerArray.deinit();
+
+                        for(values) | v | try innerArray.append(toValueType(alloc, v, true));
+
+                        return Value.ValueType {
+                            .nest_array = innerArray
+                        };
+                    }
+                    const array = std.ArrayList(Value).init(alloc);
+                    for(values) | v | try array.append(toValueType(alloc, v, true));
+                    return Value.ValueType {
+                        .array = array
+                    };
+                },
+            };
+        }
+
+        fn convertValue(alloc: std.mem.Allocator, source: *MonolithicParam.Source, ast: MonolithicParam.Value, inArray: bool) !Value {
+            return Value{
+                .value = toValueType(alloc, ast, inArray),
+                .owner = Owner{ .ast = source }
+            };
+        }
+
         fn addParam(self: *Context, ast: *MonolithicParam.Parameter, source: *MonolithicParam.Source) !void {
             if (self.access >= Access.ReadOnly) {
                 std.debug.print(
@@ -134,18 +167,26 @@ pub const ParamDatabase = struct {
                         existing.deinit(alloc);
                     }
                     const nameCopy = try alloc.dupe(u8, ast.name.*);
-                    const value: Value = undefined; //todo
+                    const value: Value = convertValue(ast.val, false);
                     self.parameters.put(nameCopy, value);
                 },
                 .AddAssign => {
                     const array = try self.getOrCreateArray(ast.name, source);
-                    _ = array;
-                    //Lets add here
+                    if(ast.val.* != .array) {
+                        return error.InvalidAddAssign;
+                    }
+
+                    for(ast.val.array) |val| {
+                        try array.value.array.append(convertValue(val, true));
+                    }
                 },
                 .SubAssign => {
                     const array = try self.getOrCreateArray(ast.name, source);
+                    if(ast.val.* != .array) {
+                        return error.InvalidSubAssign;
+                    }
                     _ = array;
-                    //Lets sub here
+                    return error.SubAssignNotImplemented;//TODO: Lets sub here; we need to test how the tools do this
                 }
             }
         }
