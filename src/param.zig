@@ -87,7 +87,9 @@ pub const ParamDatabase = struct {
                         const innerArray = std.ArrayList(Value.ValueType).init(alloc);
                         errdefer innerArray.deinit();
 
-                        for(values) | v | try innerArray.append(toValueType(alloc, v, true));
+                        for(values) | v | try innerArray.append(
+                            toValueType(alloc, v, true)
+                        );
 
                         return Value.ValueType {
                             .nest_array = innerArray
@@ -121,6 +123,7 @@ pub const ParamDatabase = struct {
 
             switch (ast.op) {
                 .Assign => {
+                    // if this is access we should hyjack it and set access
                     if (self.parameters.get(ast.name.*)) | existing | {
                         if(self.access >= Access.ReadCreate) {
                             std.debug.print(
@@ -138,19 +141,29 @@ pub const ParamDatabase = struct {
                     self.parameters.put(nameCopy, value);
                 },
                 .AddAssign => {
-                    const array = try self.getOrCreateArrayAst(ast.name, source);
+                    if (ast.val != .array) {
+                        return error.InvalidAddAssign;
+                    }
+                    const array = try self.getOrCreateArrayAst(
+                        ast.name,
+                        source,
+                        ast.val.array.len
+                    );
                     for(ast.val.array) |val| try array.value.array.append(convertValue(val, true));
                 },
                 .SubAssign => {
-                    const array = try self.getOrCreateArrayAst(ast.name, source);
+                    if (ast.val != .array) {
+                        return error.InvalidSubAssign;
+                    }
+                    const array = try self.getOrCreateArrayAst(ast.name, source, 0);
+                    if(array.value.array.items.len == 0) return;
 
-                    _ = array;
                     return error.SubAssignNotImplemented;//TODO: Lets sub here; we need to test how the tools do this
                 }
             }
         }
 
-        fn getOrCreateArrayAst(self: *Context, name: []const u8, source: *Source) !*Value {
+        fn getOrCreateArrayAst(self: *Context, name: []const u8, source: *Source, capacity: usize) !*Value {
             if (self.parameters.getPtr(name)) | array | if(array != .array) {
                 error.ValueNotArray;
             } else array;
@@ -158,11 +171,11 @@ pub const ParamDatabase = struct {
             const newArray = Value {
                 .owner = source,
                 .value = Value.ValueType {
-                    .array = std.ArrayList(Value).init(self.database.allocator)
+                    .array = std.ArrayList(Value).initCapacity(Allocator, capacity)
                 }
             };
             const nameCopy = try self.database.allocator.dupe(u8, name);
-            self.parameters.put(nameCopy, newArray);
+            try self.parameters.put(nameCopy, newArray);
             return self.parameters.getPtr(nameCopy);
         }
 
@@ -345,12 +358,6 @@ pub const MonolithicParam = struct {
     file:       []const u8,
     references: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
-    pub const Operator = enum {
-        Assign,
-        AddAssign,
-        SubAssign,
-    };
-
     fn addRef(self: *MonolithicParam) void {
         _ = self.references.fetchAdd(1, .monotonic);
     }
@@ -382,6 +389,13 @@ pub const MonolithicParam = struct {
         self.allocator.free(self.statements);
 
     }
+
+    pub const Operator = enum {
+        Assign,
+        AddAssign,
+        SubAssign,
+    };
+
     pub const Value = union(enum) {
         array: []const Value,
         str:   []const u8,
@@ -474,7 +488,11 @@ pub const ParamPreproc = struct {
 };
 
 pub const ParamParser = struct {
-
+    allocator: Allocator,
+    index: usize = 0,
+    stack: std.ArrayList(MutableClass),
+    currentContext: MutableClass,
+    text: []const u8,
     const MutableClass = struct {
         name:       []const u8,
         base:       ?[]const u8,
@@ -485,36 +503,148 @@ pub const ParamParser = struct {
         char == ' ' or char == '\n' or char == '\t' or char == '\r' or char == 0x000B or char == 0x000C;
     }
 
-    pub fn parse(allocator: Allocator, path: []const u8, text: []const u8) !MonolithicParam {
-        const index: usize = 0;
-        const stack = std.ArrayList(MutableClass).init(allocator);
-        defer stack.deinit();
+    pub fn skipWhitespace(self: *ParamParser) void {
+        while (self.index < self.text.len and isWhitespace(self.text[self.index])) : (self.index += 1){}
+    }
 
-        stack.append(MutableClass {
+    pub fn getWord(self: *ParamParser) ![]u8 {
+        self.skipWhitespace();
+        const start = self.index;
+        while (std.ascii.isAlphanumeric(self.text[self.index]) or self.text[self.index] ) : (self.index += 1){ }
+
+        return self.allocator.dupe(u8, self.text[start..self.index]);
+    }
+
+    pub fn parse(allocator: Allocator, path: []const u8, text: []const u8) !MonolithicParam {
+
+        //We should have a fast generated grammar here for better debug output.
+        const self = ParamParser {
+            .allocator = allocator,
+            .index = 0,
+            .stack = std.ArrayList(MonolithicParam.Statement).init(allocator),
+            .currentContext = undefined,
+            .text = text,
+        };
+        try self.stack.append(MutableClass {
             .name = path,
             .base = null,
-            .statements = std.ArrayList(MonolithicParam.Statement).init(allocator)
+            .statements = std.ArrayList(MonolithicParam.Statement).init(allocator),
         });
+        self.currentContext = self.stack.getLast();
 
-        const currentContext: MutableClass = stack.getLast();
-        while (stack.items.len > 0) {
-            while (index < text.len and isWhitespace(text[index])) : (index += 1){}
+        while (self.stack.items.len > 0) {
+            self.skipWhitespace();
 
-            switch (text[index]) {
+            if(self.index >= text.len) {
+                if (self.stack.items.len > 1)  {
+                    std.debug.print("Missing '}'", {});
+                    return error.ParseFail;
+                } else break;
+            }
+
+            switch (text[self.index]) {
                 '#' => {
                     //todo line
                     continue;
                 },
                 '}' => {
-                    index += 1;
-                    while (index < text.len and isWhitespace(text[index] or text[index] == ';')) : (index += 1){}
-                    if (stack.items.len > 1) |last| {
-                        const class: MutableClass = stack.pop();
-                        currentContext = last;
-                        try currentContext.statements.append(class);
+                    self.index += 1;
+                    while (
+                        self.index < text.len and (isWhitespace(text[self.index]) or text[self.index] == ';')
+                    ) : (self.index += 1) {}
+                    //semicolon enforcement
+                    if (self.stack.items.len > 1)  {
+                        const class: MutableClass = self.stack.pop();
+                        self.currentContext = self.stack.getLast();
+                        try self.currentContext.statements.append(MonolithicParam.Statement {
+                            .class = MonolithicParam.Class {
+                                .name = class.name,
+                                .base = class.base,
+                                .statements = try class.statements.toOwnedSlice()
+                            }
+                        });
+                        continue;
                     } else {
-                        break;
+                        std.debug.print("Invalid '}'", {});
+                        return error.ParseFail;
                     }
+                },
+                _ => {
+                    const word = try self.getWord();
+                    if(word.len == 0) {
+                        std.debug.print("Expected word", {});
+                        return error.ParseFail;
+                    }
+                    if(std.mem.eql(u8, word, "delete")) {
+                        allocator.free(word);
+                        word = try self.getWord();
+                        if(word.len == 0) {
+                            std.debug.print("Expected word", {});
+                            return error.ParseFail;
+                        }
+
+                        self.skipWhitespace();
+                        if (text[self.index] != ';') {
+                            std.debug.print("Expected semicolon.", {});
+                            return error.ParseFail;
+                        }
+
+                        self.index += 1;
+
+                        self.currentContext.statements.append(MonolithicParam.Statement {
+                            .delete = word
+                        });
+                    } else if(std.mem.eql(u8, word, "class")) {
+                        allocator.free(word);
+                        word = try self.getWord();
+                        if(word.len == 0) {
+                            std.debug.print("Expected word", {});
+                            return error.ParseFail;
+                        }
+                        self.skipWhitespace();
+
+                        if (text[self.index] == ';') {
+                            self.index += 1;
+                            self.currentContext.statements.append(MonolithicParam.Statement {
+                                .external = word
+                            });
+                            continue;
+                        }
+                        const base: ?[]u8 = null;
+                        if (text[self.index] == ':') {
+                            self.index += 1;
+                            //visibility test
+                            base = try self.getWord();
+                            if(base.?.len == 0) {
+                                std.debug.print("Expected word", {});
+                                return error.ParseFail;
+                            }
+
+                            self.skipWhitespace();
+                        }
+
+                        if (text[self.index] != '{') {
+                            std.debug.print("Expected '{'", {});
+                            return error.ParseFail;
+                        }
+                        self.index += 1;
+                        try self.stack.append(MutableClass {
+                            .name = word,
+                            .base = base,
+                            .statements = std.ArrayList(MonolithicParam.Statement).init(allocator)
+                        });
+                        self.currentContext = self.stack.getLast();
+                        continue;
+                    } else if(std.mem.eql(u8, word, "enum")) {
+                        allocator.free(word);
+
+                    } else if(std.mem.eql(u8, word, "__EXEC")) {
+                        allocator.free(word);
+
+                    } else { //this word is a parameter name; dont free, allocator still holds ownership
+
+                    }
+
                 }
             }
         }
