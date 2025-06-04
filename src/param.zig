@@ -124,6 +124,20 @@ pub const ParamDatabase = struct {
             switch (ast.op) {
                 .Assign => {
                     // if this is access we should hyjack it and set access
+                    if(std.mem.eql(u8 , ast.name, "access")) {
+                        if(ast.val == .i32) {
+                            self.access = @enumFromInt(ast.val.i32); //int to enum value
+                        } else {
+                            std.debug.print(
+                                "Invalid Access {}",
+                                .{ast.val.i32}
+                            );
+                            return error.WrongAccessInt;
+                        }
+
+                        return;
+                    }
+
                     if (self.parameters.get(ast.name.*)) | existing | {
                         if(self.access >= Access.ReadCreate) {
                             std.debug.print(
@@ -136,6 +150,7 @@ pub const ParamDatabase = struct {
                         self.parameters.removeByPtr(ast.name.*);
                         existing.deinit(alloc);
                     }
+
                     const nameCopy = try alloc.dupe(u8, ast.name.*);
                     const value: Value = convertValue(ast.val, false);
                     self.parameters.put(nameCopy, value);
@@ -284,9 +299,86 @@ pub const ParamDatabase = struct {
             }
         }
 
-        pub fn getClass(self: *Context, name: []u8) ?*Context {
+        pub const Entry = union {
+            class: *Context,
+            param: *Value
+        };
+
+        pub fn getClass(self: *Context, name: []const u8) ?*Context {
             if (self.classes.get(name)) |*context| {
                 return context;
+            }
+
+            return null;
+        }
+
+        pub fn findEntry(self: *Context, name: []const u8, parent: bool, base: bool) !?Entry {
+            if (self.getClass(name)) | clazz | return Entry {
+                .class = clazz
+            } else if (self.getParam(name)) | param | return Entry {
+                .param = param
+            } else if (base and self.base) {
+                return self.base.?.findEntry(name, false, true);
+            } else if(parent and self.parent) {
+                return self.parent.?.findEntry(name, parent, base);
+            } else return null;
+        }
+
+        pub fn derivedFrom(self: *Context, parent: *Context) bool {
+            const base: ?*Context = self;
+            while (base) | found| {
+                if(found == parent) return true;
+                base = found.base;
+            }
+            return false;
+        }
+
+        pub fn getParam(self: *Context, name: []const u8) ?*Value {
+            if (self.parameters.getPtr(name)) |parameter| {
+                return parameter;
+            }
+
+            return null;
+        }
+
+        pub fn getParamOwner(self: *Context, name: []const u8) ?*Source {
+            if (try self.getParam(name)) | param | {
+                return param.owner;
+            }
+
+            return null;
+        }
+
+        pub fn getString(self: *Context, name: []const u8) ?[]u8 {
+            if (self.getParam(name)) | param | {
+                if(param.value != .string) return null;
+                return param.value.string;
+            }
+            return null;
+        }
+
+        pub fn getInt32(self: *Context, name: []const u8) ?*i32 {
+            if (self.getParam(name)) | param | {
+                if(param.value != .i32) return null;
+                return param.value.i32;
+            }
+
+            return null;
+        }
+
+        pub fn getInt64(self: *Context, name: []const u8) ?*i64 {
+            if (self.getParam(name)) | param | {
+                if(param.value != .i64) return null;
+                return param.value.i64;
+            }
+
+            return null;
+        }
+
+        pub fn getFloat(self: *Context, name: []const u8) ?*f32 {
+            if (self.getParam(name)) | param | {
+                if(param.value != .f32) return null;
+                return param.value.f32;
             }
 
             return null;
@@ -569,7 +661,7 @@ pub const ParamParser = struct {
                         return error.ParseFail;
                     }
                 },
-                _ => {
+                else => {
                     const word = try self.getWord();
                     if(word.len == 0) {
                         std.debug.print("Expected word", {});
@@ -649,6 +741,4 @@ pub const ParamParser = struct {
             }
         }
     }
-
-
 };
