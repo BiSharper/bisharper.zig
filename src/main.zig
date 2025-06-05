@@ -7,7 +7,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
 
-    var prng = std.rand.DefaultPrng.init(5);
+    var prng = std.Random.DefaultPrng.init(5);
     const rng = prng.random();
     const random_data_size = 100 * 1024 * 1024;
 

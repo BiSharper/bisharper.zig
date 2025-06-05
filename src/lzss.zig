@@ -350,7 +350,7 @@ pub fn encode(allocator: std.mem.Allocator, input: []const u8, signed_checksum: 
     return try allocator.realloc(out, @intCast(out_idx));
 }
 
-pub fn random(allocator: std.mem.Allocator, rng: std.rand.Random, expected_output_size: usize, signed_checksum: bool) ![]u8 {
+pub fn random(allocator: std.mem.Allocator, rng: std.Random, expected_output_size: usize, signed_checksum: bool) ![]u8 {
     const MIN_MATCH: i32 = MATCH_THRESHOLD + 1;
     const MAX_MATCH: i32 = F;
     const MATCH_PROB: f32 = 0.3; //Directly correlates to entropy
@@ -459,7 +459,7 @@ const testing = std.testing;
 const test_allocator = testing.allocator;
 
 test "Generate and decompress random LZSS" {
-    var prng = std.rand.DefaultPrng.init(5);
+    var prng = std.Random.DefaultPrng.init(5);
     const rng = prng.random();
 
     const sizes = [_]usize{
