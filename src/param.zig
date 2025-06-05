@@ -260,6 +260,24 @@ pub const ParamDatabase = struct {
                 }
             };
             try context.addStatementsAst(ast.statements, source);
+            if (context.access == .Default) {
+                if(context.base != null and context.base.?.access > .Default) {
+                    context.access = context.base.?.access;
+                } else if( context.parent) | parent | {
+                    var ctx: ?*Context = parent;
+                    while (ctx) {
+                        if(ctx.access > .Default) {
+                            context.access = ctx.access;
+                            break;
+                        }
+                        if(ctx.base and ctx.base.?.access > .Default) {
+                            context.access = ctx.base.?.access;
+                            break;
+                        }
+                        ctx = parent.parent;
+                    }
+                }
+            }
         }
 
         fn deleteClassAst(self: *Context, className: []const u8) !void {
@@ -462,7 +480,8 @@ pub const MonolithicParam = struct {
         return ParamParser.parse(
             allocator,
             path,
-            try preproc.preprocess(allocator, path, text)
+            text,
+            preproc
         );
     }
 
@@ -568,14 +587,22 @@ pub const MonolithicParam = struct {
 
 };
 
-pub const ParamPreproc = struct {
-    processorAllocator: Allocator,
 
-    pub fn preprocess(self: *ParamPreproc, allocator: Allocator, name: []const u8, text: []const u8) ![]const u8 {
+
+pub const ParamPreproc = struct {
+    allocator: Allocator,
+
+    pub const PreprocOutput = struct {
+        text: []const u8,
+    };
+
+    pub fn preprocess(self: *ParamPreproc, parseAlloc: Allocator, name: []const u8, text: []const u8) !PreprocOutput {
         _ = self;
         _ = name;
-        _ = allocator;
-        return text;
+        _ = parseAlloc;
+        return PreprocOutput {
+            .text = text,
+        };
     }
 };
 
@@ -584,7 +611,8 @@ pub const ParamParser = struct {
     index: usize = 0,
     stack: std.ArrayList(MutableClass),
     currentContext: MutableClass,
-    text: []const u8,
+    procOutput: ParamPreproc.PreprocOutput,
+
     const MutableClass = struct {
         name:       []const u8,
         base:       ?[]const u8,
@@ -596,27 +624,30 @@ pub const ParamParser = struct {
     }
 
     pub fn skipWhitespace(self: *ParamParser) void {
-        while (self.index < self.text.len and isWhitespace(self.text[self.index])) : (self.index += 1){}
+        while (self.index < self.procOutput.text.len and isWhitespace(self.procOutput.text[self.index])) : (self.index += 1){}
     }
 
     pub fn getWord(self: *ParamParser) ![]u8 {
         self.skipWhitespace();
         const start = self.index;
-        while (std.ascii.isAlphanumeric(self.text[self.index]) or self.text[self.index] ) : (self.index += 1){ }
+        while (std.ascii.isAlphanumeric(self.procOutput.text[self.index]) or self.procOutput.text[self.index] ) : (self.index += 1){ }
 
-        return self.allocator.dupe(u8, self.text[start..self.index]);
+        return self.allocator.dupe(u8, self.procOutput.text[start..self.index]);
     }
 
-    pub fn parse(allocator: Allocator, path: []const u8, text: []const u8) !MonolithicParam {
+    pub fn parseArray(self: *ParamParser) !MonolithicParam.Value {
+        _ = self;
+    }
 
-        //We should have a fast generated grammar here for better debug output.
+    pub fn parse(allocator: Allocator, path: []const u8, text: []const u8, preproc: ParamPreproc) !MonolithicParam {
         const self = ParamParser {
             .allocator = allocator,
             .index = 0,
             .stack = std.ArrayList(MonolithicParam.Statement).init(allocator),
             .currentContext = undefined,
-            .text = text,
+            .procOutput = try preproc.preprocess(allocator, path, text),
         };
+
         try self.stack.append(MutableClass {
             .name = path,
             .base = null,
@@ -634,7 +665,7 @@ pub const ParamParser = struct {
                 } else break;
             }
 
-            switch (text[self.index]) {
+            switch (self.procOutput.text[self.index]) {
                 '#' => {
                     //todo line
                     continue;
@@ -642,7 +673,8 @@ pub const ParamParser = struct {
                 '}' => {
                     self.index += 1;
                     while (
-                        self.index < text.len and (isWhitespace(text[self.index]) or text[self.index] == ';')
+                        self.index < self.procOutput.text.len and
+                            (isWhitespace(self.procOutput.text[self.index]) or self.procOutput.text[self.index] == ';')
                     ) : (self.index += 1) {}
                     //semicolon enforcement
                     if (self.stack.items.len > 1)  {
@@ -676,7 +708,7 @@ pub const ParamParser = struct {
                         }
 
                         self.skipWhitespace();
-                        if (text[self.index] != ';') {
+                        if (self.procOutput.text[self.index] != ';') {
                             std.debug.print("Expected semicolon.", {});
                             return error.ParseFail;
                         }
@@ -695,7 +727,7 @@ pub const ParamParser = struct {
                         }
                         self.skipWhitespace();
 
-                        if (text[self.index] == ';') {
+                        if (self.procOutput.text[self.index] == ';') {
                             self.index += 1;
                             self.currentContext.statements.append(MonolithicParam.Statement {
                                 .external = word
@@ -703,7 +735,7 @@ pub const ParamParser = struct {
                             continue;
                         }
                         const base: ?[]u8 = null;
-                        if (text[self.index] == ':') {
+                        if (self.procOutput.text[self.index] == ':') {
                             self.index += 1;
                             //visibility test
                             base = try self.getWord();
@@ -715,7 +747,7 @@ pub const ParamParser = struct {
                             self.skipWhitespace();
                         }
 
-                        if (text[self.index] != '{') {
+                        if (self.procOutput.text[self.index] != '{') {
                             std.debug.print("Expected '{'", {});
                             return error.ParseFail;
                         }
@@ -734,6 +766,56 @@ pub const ParamParser = struct {
                         allocator.free(word);
 
                     } else { //this word is a parameter name; dont free, allocator still holds ownership
+                        if(self.procOutput.text[self.index] == '[') {
+                            self.index += 1;
+                            self.skipWhitespace();
+                            if(self.procOutput.text[self.index] != ']') {
+                                std.debug.print("Expected ']'", {});
+                                return error.ParseFail;
+                            }
+
+                            self.index += 1;
+                            self.skipWhitespace();
+
+                            var op = MonolithicParam.Operator.Assign;
+                            if(self.procOutput.text[self.index] == '+') {
+                                self.index += 1;
+                                self.skipWhitespace();
+                                op = .AddAssign;
+                            } else if(self.procOutput.text[self.index] == '-') {
+                                self.index += 1;
+                                self.skipWhitespace();
+                                op = .SubAssign;
+                            }
+
+                            if(self.procOutput.text[self.index] != '=') {
+                                std.debug.print("Expected '='", {});
+                                return error.ParseFail;
+                            }
+                            const value = try self.parseArray();
+
+                            self.skipWhitespace();
+                            if(self.procOutput.text[self.index] != ';') {
+                                self.index += 1;
+                                std.debug.print("Expected ';'", {});
+                                return error.ParseFail;
+                            }
+
+                            self.currentContext.statements.append(MonolithicParam.Statement {
+                                .param = MonolithicParam.Parameter {
+                                    .name = word ,
+                                    .op = op,
+                                    .val = value
+                                }
+                            });
+                            continue;
+                        }
+                        self.skipWhitespace();
+                        if(self.procOutput.text[self.index] != '=') {
+                            std.debug.print("Expected '='", {});
+                            return error.ParseFail;
+                        }
+                        self.index += 1;
 
                     }
 
