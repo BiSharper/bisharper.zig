@@ -8,6 +8,60 @@ const expectEqualStrings = testing.expectEqualStrings;
 
 const param = @import("root.zig");
 
+
+test "Context.getParameter" {
+    const allocator = std.testing.allocator;
+
+    // 1. Setup: Create a root database context for our tests
+    var root = try param.database("test_db", allocator);
+    defer root.release(); // Ensure cleanup after the test finishes
+
+    const ctx = root.context;
+
+    // 2. Add parameters of various types
+    try ctx.addParameter("my_i32", @as(i32, 123));
+    try ctx.addParameter("my_i64", @as(i64, 456));
+    try ctx.addParameter("my_f32", @as(f32, 78.9));
+    try ctx.addParameter("my_string", "hello world");
+    try ctx.addParameter("my_empty_string", "");
+
+    // 3. Test successful retrievals with correct types
+    {
+        const i32_val = ctx.getValue(i32, "my_i32");
+        try std.testing.expect(i32_val != null);
+        try std.testing.expectEqual(@as(i32, 123), i32_val.?);
+
+        const i64_val = ctx.getValue(i64, "my_i64");
+        try std.testing.expect(i64_val != null);
+        try std.testing.expectEqual(@as(i64, 456), i64_val.?);
+
+        const f32_val = ctx.getValue(f32, "my_f32");
+        try std.testing.expect(f32_val != null);
+        try std.testing.expectEqual(@as(f32, 78.9), f32_val.?);
+
+        const greeting_val = ctx.getValue([]const u8, "my_string");
+        try std.testing.expect(greeting_val != null); // It should NOT be null
+        try std.testing.expectEqualStrings("hello world", greeting_val.?);
+    }
+
+    // 4. Test type mismatches - all should return null
+    {
+        const wrong_type_i32 = ctx.getValue(f32, "my_i32");
+        try std.testing.expect(wrong_type_i32 == null);
+
+        const wrong_type_f32 = ctx.getValue(i64, "my_f32");
+        try std.testing.expect(wrong_type_f32 == null);
+
+        const wrong_type_str = ctx.getValue(i32, "my_string");
+        try std.testing.expect(wrong_type_str == null);
+    }
+
+    {
+        const not_found = ctx.getValue(i32, "non_existent_param");
+        try std.testing.expect(not_found == null);
+    }
+
+}
 test "simple retain/release stress" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
