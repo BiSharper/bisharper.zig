@@ -113,10 +113,8 @@ pub const Context = struct {
         const old_refs = self.refs.rmw(.Sub, 1, .acq_rel);
         std.debug.assert(old_refs != 0);
 
-        if (self.parent) |_| {
-            for (1..self.parent_refs.len) |i| {
-                std.debug.assert(@volatileCast(self.parent_refs[i]).rmw(.Sub, 1, .acq_rel) != 0);
-            }
+        for (1..self.parent_refs.len) |i| {
+            std.debug.assert(@volatileCast(self.parent_refs[i]).rmw(.Sub, 1, .acq_rel) != 0);
         }
 
         if (old_refs == 1) {
@@ -206,6 +204,16 @@ pub const Context = struct {
             _ = base.derivatives.rmw(.Sub, 1, .acq_rel);
             base.checkBaseCleanup();
         }
+
+        if (self.parent) |parent| {
+            parent.mutex.lock();
+            defer parent.mutex.unlock();
+
+            if (parent.children.fetchRemove(self.name)) |removed_entry| {
+                self.root.allocator.free(removed_entry.key);
+            }
+        }
+
 
         var children_to_deinit = std.ArrayList(*Context).init(self.root.allocator);
         defer children_to_deinit.deinit();

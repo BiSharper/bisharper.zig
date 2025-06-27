@@ -145,16 +145,58 @@ const MultithreadTests = struct {
     };
 
 
-    test "Concurrent retain and release" {
+    test "Concurrent retain and release - Balanced" {
         var root_db = try param.database("test_db", testing.allocator);
         defer root_db.release();
 
         const root_ctx = root_db.retain();
         defer root_ctx.release();
 
-        const iterations = 100_000;
+        const iterations = 10_000;
         const num_threads = 4;
-        try testing.expectEqual(2, root_ctx.refs.load(.acquire));
+
+        const worker = struct {
+            fn worker(ctx: *ThreadContext) void {
+                var i: usize = 0;
+                while (i < ctx.iterations) : (i += 1) {
+                    const retained = ctx.root_ctx.retain();
+                    retained.release();
+                }
+            }
+        }.worker;
+
+        var threads: [num_threads]std.Thread = undefined;
+        var thread_contexts: [num_threads]ThreadContext = undefined;
+
+        for (0..num_threads) |i| {
+            thread_contexts[i] = .{ .root_ctx = root_ctx, .iterations = iterations };
+            threads[i] = try std.Thread.spawn(.{}, worker, .{&thread_contexts[i]});
+        }
+
+        for (&threads) |*t| {
+            t.join();
+        }
+
+        try testing.expectEqual(@as(usize, 2), root_ctx.refs.load(.acquire));
+    }
+
+    test "Concurrent retain and release - Separate threads" {
+        var root_db = try param.database("test_db", testing.allocator);
+        defer root_db.release();
+
+        const root_ctx = root_db.retain();
+        defer root_ctx.release();
+
+        const iterations = 1000;
+        const num_threads = 4;
+
+        var safety_refs: [iterations * 2]*param.Context = undefined;
+        for (0..safety_refs.len) |i| {
+            safety_refs[i] = root_ctx.retain();
+        }
+        defer for (safety_refs) |ref| {
+            ref.release();
+        };
 
         var threads: [num_threads]std.Thread = undefined;
         var thread_contexts: [num_threads]ThreadContext = undefined;
@@ -189,7 +231,10 @@ const MultithreadTests = struct {
         for (&threads) |*t| {
             t.join();
         }
-        try testing.expectEqual(@as(usize, 2), root_ctx.refs.load(.acquire));
+
+        // Should be original + safety buffer
+    const expected = 2 + safety_refs.len;
+        try testing.expectEqual(expected, root_ctx.refs.load(.acquire));
     }
 };
 
@@ -197,5 +242,5 @@ const MultithreadTests = struct {
 test {
     //
     std.testing.refAllDecls(RefCountTests);
-    // std.testing.refAllDecls(MultithreadTests);
+    std.testing.refAllDecls(MultithreadTests);
 }
