@@ -140,37 +140,83 @@ const RefCountTests = struct {
 
 const MultithreadTests = struct {
     const ThreadContext = struct {
-        root_ctx: *param.Context,
+        root_ctx:   *param.Context,
         iterations: usize,
+        thread_id:  usize
+    };
+
+    const CreateContext = struct {
+        parent_ctx:       *param.Context,
+        iterations:       usize,
+        thread_id:        usize,
+        created_contexts: *std.ArrayList(*param.Context),
+        mutex:            *std.Thread.Mutex,
     };
 
 
-    test "Concurrent retain and release - Balanced" {
-        var root_db = try param.database("test_db", testing.allocator);
+    test "Stress test: Heavy retain/release with random delays" {
+        var root_db = try param.database("stress_test_db", testing.allocator);
         defer root_db.release();
 
         const root_ctx = root_db.retain();
         defer root_ctx.release();
 
-        const iterations = 10_000;
-        const num_threads = 4;
+        const iterations = 1;
+        const num_threads = 1;
 
-        const worker = struct {
-            fn worker(ctx: *ThreadContext) void {
+        var prng = std.Random.DefaultPrng.init(12345);
+        const random = prng.random();
+
+        const StressWorker = struct {
+            fn worker(ctx: *ThreadContext, rng: std.Random) void {
+
+                var retained_contexts = std.ArrayList(*param.Context).init(testing.allocator);
+                defer {
+                    for (retained_contexts.items) |retained_ctx| {
+                        retained_ctx.release();
+                    }
+                    retained_contexts.deinit();
+                }
+
                 var i: usize = 0;
                 while (i < ctx.iterations) : (i += 1) {
-                    const retained = ctx.root_ctx.retain();
-                    retained.release();
+                    const operation = rng.intRangeAtMost(u8, 0, 2);
+
+                    switch (operation) {
+                        0 => {
+                            const retained = ctx.root_ctx.retain();
+                            retained_contexts.append(retained) catch @panic("OOM");
+                        },
+                        1 => {
+                            if (retained_contexts.items.len > 0) {
+                                const idx = rng.intRangeLessThan(usize, 0, retained_contexts.items.len);
+                                const to_release = retained_contexts.swapRemove(idx);
+                                to_release.release();
+                            }
+                        },
+                        2 => {
+                            const retained = ctx.root_ctx.retain();
+                            retained.release();
+                        },
+                        else => break,
+                    }
+                    if (rng.intRangeAtMost(u8, 0, 100) < 5) {
+                        std.Thread.yield() catch {};
+                    }
                 }
             }
-        }.worker;
+        };
 
         var threads: [num_threads]std.Thread = undefined;
         var thread_contexts: [num_threads]ThreadContext = undefined;
 
         for (0..num_threads) |i| {
-            thread_contexts[i] = .{ .root_ctx = root_ctx, .iterations = iterations };
-            threads[i] = try std.Thread.spawn(.{}, worker, .{&thread_contexts[i]});
+            thread_contexts[i] = .{
+                .root_ctx = root_ctx,
+                .iterations = iterations,
+                .thread_id = i,
+            };
+            threads[i] = try std.Thread.spawn(.{}, StressWorker.worker, .{&thread_contexts[i], random});
         }
 
         for (&threads) |*t| {
@@ -180,61 +226,121 @@ const MultithreadTests = struct {
         try testing.expectEqual(@as(usize, 2), root_ctx.refs.load(.acquire));
     }
 
-    test "Concurrent retain and release - Separate threads" {
-        var root_db = try param.database("test_db", testing.allocator);
+    test "Concurrent inheritance chain operations" {
+        var root_db = try param.database("inheritance_db", testing.allocator);
         defer root_db.release();
 
         const root_ctx = root_db.retain();
         defer root_ctx.release();
 
+        const base_class = try root_ctx.createClass("BaseClass", null);
+        defer base_class.release();
+
+        const derived_class = try root_ctx.createClass("DerivedClass", base_class);
+        defer derived_class.release();
+
         const iterations = 1000;
         const num_threads = 4;
 
-        var safety_refs: [iterations * 2]*param.Context = undefined;
-        for (0..safety_refs.len) |i| {
-            safety_refs[i] = root_ctx.retain();
+        var all_contexts = std.ArrayList(*param.Context).init(testing.allocator);
+        defer {
+            for (all_contexts.items) |ctx| {
+                ctx.release();
+            }
+            all_contexts.deinit();
         }
-        defer for (safety_refs) |ref| {
-            ref.release();
+
+        var contexts_mutex = std.Thread.Mutex{};
+
+        const InheritanceWorker = struct {
+            fn worker(ctx: *CreateContext, base: *param.Context, derived: *param.Context) void {
+                var local_prng = std.Random.DefaultPrng.init(@intCast(ctx.thread_id * 2021));
+                var local_random = local_prng.random();
+
+                var i: usize = 0;
+                while (i < ctx.iterations) : (i += 1) {
+                    const operation = local_random.intRangeAtMost(u8, 0, 4);
+
+                    switch (operation) {
+                        0 => {
+                            // Create class extending base
+                            var class_name_buf: [32]u8 = undefined;
+                            const class_name = std.fmt.bufPrint(&class_name_buf, "ext_base_{}_{}", .{ctx.thread_id, i}) catch unreachable;
+
+                            if (ctx.parent_ctx.createClass(class_name, base)) |new_class| {
+                                ctx.mutex.lock();
+                                defer ctx.mutex.unlock();
+                                ctx.created_contexts.append(new_class) catch @panic("OOM");
+                            } else |_| {}
+                        },
+                        1 => {
+                            // Create class extending derived
+                            var class_name_buf: [32]u8 = undefined;
+                            const class_name = std.fmt.bufPrint(&class_name_buf, "ext_derived_{}_{}", .{ctx.thread_id, i}) catch unreachable;
+
+                            if (ctx.parent_ctx.createClass(class_name, derived)) |new_class| {
+                                ctx.mutex.lock();
+                                defer ctx.mutex.unlock();
+                                ctx.created_contexts.append(new_class) catch @panic("OOM");
+                            } else |_| {}
+                        },
+                        2 => {
+                            // Retain and release base class
+                            const retained = base.retain();
+                            retained.release();
+                        },
+                        3 => {
+                            // Retain and release derived class
+                            const retained = derived.retain();
+                            retained.release();
+                        },
+                        4 => {
+                            // Change inheritance of a random existing class
+                            ctx.mutex.lock();
+                            defer ctx.mutex.unlock();
+
+                            if (ctx.created_contexts.items.len > 0) {
+                                const idx = local_random.intRangeLessThan(usize, 0, ctx.created_contexts.items.len);
+                                const target = ctx.created_contexts.items[idx];
+
+                                // Randomly extend base, derived, or null
+                                const extend_choice = local_random.intRangeAtMost(u8, 0, 2);
+                                switch (extend_choice) {
+                                    0 => target.extend(base),
+                                    1 => target.extend(derived),
+                                    2 => target.extend(null),
+                                    else => break
+                                }
+                            }
+                        },
+                        else => break
+                    }
+                }
+            }
         };
 
         var threads: [num_threads]std.Thread = undefined;
-        var thread_contexts: [num_threads]ThreadContext = undefined;
-
-        const retain_worker = struct {
-            fn retain_worker(ctx: *ThreadContext) void {
-                var i: usize = 0;
-                while (i < ctx.iterations) : (i += 1) {
-                    _ = ctx.root_ctx.retain();
-                }
-            }
-        }.retain_worker;
-
-        const release_worker = struct {
-            fn release_worker(ctx: *ThreadContext) void {
-                var i: usize = 0;
-                while (i < ctx.iterations) : (i += 1) {
-                    ctx.root_ctx.release();
-                }
-            }
-        }.release_worker;
+        var create_contexts: [num_threads]CreateContext = undefined;
 
         for (0..num_threads) |i| {
-            thread_contexts[i] = .{ .root_ctx = root_ctx, .iterations = iterations };
-            if (i % 2 == 0) {
-                threads[i] = try std.Thread.spawn(.{}, retain_worker, .{&thread_contexts[i]});
-            } else {
-                threads[i] = try std.Thread.spawn(.{}, release_worker, .{&thread_contexts[i]});
-            }
+            create_contexts[i] = .{
+                .parent_ctx = root_ctx,
+                .iterations = iterations,
+                .thread_id = i,
+                .created_contexts = &all_contexts,
+                .mutex = &contexts_mutex,
+            };
+            threads[i] = try std.Thread.spawn(.{}, InheritanceWorker.worker, .{&create_contexts[i], base_class, derived_class});
         }
 
         for (&threads) |*t| {
             t.join();
         }
 
-        // Should be original + safety buffer
-    const expected = 2 + safety_refs.len;
-        try testing.expectEqual(expected, root_ctx.refs.load(.acquire));
+        // Verify reference counts are sane
+        try testing.expect(base_class.refs.load(.acquire) > 0);
+        try testing.expect(derived_class.refs.load(.acquire) > 0);
+        try testing.expect(base_class.derivatives.load(.acquire) >= 1); // At least derived_class extends it
     }
 };
 

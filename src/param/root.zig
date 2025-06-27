@@ -205,16 +205,6 @@ pub const Context = struct {
             base.checkBaseCleanup();
         }
 
-        if (self.parent) |parent| {
-            parent.mutex.lock();
-            defer parent.mutex.unlock();
-
-            if (parent.children.fetchRemove(self.name)) |removed_entry| {
-                self.root.allocator.free(removed_entry.key);
-            }
-        }
-
-
         var children_to_deinit = std.ArrayList(*Context).init(self.root.allocator);
         defer children_to_deinit.deinit();
 
