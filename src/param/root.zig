@@ -73,7 +73,7 @@ pub const Root = struct {
 };
 
 pub const Context = struct {
-    name:        []u8,
+    name:        []const u8,
     refs:        usize,
     derivatives: usize,
     parent_refs: []volatile *usize,
@@ -82,7 +82,6 @@ pub const Context = struct {
     parent:      ?*Context,
     base:        ?*Context,
     flags:       ContextFlags,
-
 
     pub fn retain(self: *Context) *Context {
         std.debug.assert(@atomicRmw(usize, &self.refs, .Add, 1, .acq_rel) != 0);
@@ -105,7 +104,7 @@ pub const Context = struct {
         }
 
         if (old_refs == 1) {
-            if (self.derivatives > 0) {
+            if (@atomicLoad(usize, &self.derivatives, .acquire) > 0) {
                 self.flags.pending_cleanup = true;
                 return;
             }
@@ -117,12 +116,12 @@ pub const Context = struct {
 
     pub fn extend(self: *Context, new_extends: ?*Context) void {
         if (self.base) |old_base| {
-            old_base.derivatives -= 1;
+            _ = @atomicRmw(usize, &old_base.derivatives, .Sub, 1, .acq_rel);
             old_base.checkBaseCleanup();
         }
 
         if(new_extends) |new| {
-            new.derivatives += 1;
+            _ = @atomicRmw(usize, &new.derivatives, .Add, 1, .acq_rel);
             self.base = new;
         } else{
             self.base = null;
@@ -130,17 +129,8 @@ pub const Context = struct {
 
     }
 
-    fn checkBaseCleanup(self: *Context) void {
-        if (self.derivatives == 0 and self.flags.pending_cleanup) {
-            self.deinit();
-        }
-    }
-
     pub fn createClass(self: *Context, name: []const u8, extends: ?*Context) !*Context {
         const alloc = self.root.allocator;
-
-        const owned_name = try alloc.dupe(u8, name);
-        errdefer alloc.free(owned_name);
 
         const child_ctx = try alloc.create(Context);
         errdefer alloc.destroy(child_ctx);
@@ -150,8 +140,15 @@ pub const Context = struct {
 
         @memcpy(parent_strongs[1..], self.parent_refs);
 
+        const owned_name = try alloc.dupe(u8, name);
+        const gop = try self.children.getOrPut(owned_name);
+        if (gop.found_existing) {
+            alloc.free(owned_name);
+            return error.NameAlreadyExists;
+        }
+
         child_ctx.* = .{
-            .name = owned_name,
+            .name = gop.key_ptr.*,
             .refs = 1,
             .derivatives = 0,
             .parent_refs = parent_strongs,
@@ -163,17 +160,24 @@ pub const Context = struct {
         };
 
         child_ctx.parent_refs[0] = &child_ctx.refs;
-
         child_ctx.extend(extends);
+
+        gop.value_ptr.* = child_ctx;
 
         try self.children.put(owned_name, child_ctx);
 
         return child_ctx.retain();
     }
 
+    fn checkBaseCleanup(self: *Context) void {
+        if (@atomicLoad(usize, &self.derivatives, .acquire) == 0 and self.flags.pending_cleanup) {
+            self.deinit();
+        }
+    }
+
     fn deinit(self: *Context) void {
         if (self.base) |base| {
-            base.derivatives -= 1;
+            _ = @atomicRmw(usize, &base.derivatives, .Sub, 1, .acq_rel);
 
             base.checkBaseCleanup();
         }

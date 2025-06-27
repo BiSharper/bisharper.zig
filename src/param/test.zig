@@ -17,6 +17,7 @@ const RefCountTests = struct {
         defer child1.release();
 
         const child2 = try rootContext.createClass("child2", child1);
+
         defer child2.release();
 
     }
