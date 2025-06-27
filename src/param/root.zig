@@ -154,6 +154,62 @@ pub const Parameter = struct {
     name:        []const u8,
     value:       Value,
 
+    pub fn getPath(self: *Parameter, allocator: Allocator) ![]u8 {
+        return self.getInnerPath(self.value, allocator);
+    }
+
+    pub fn getInnerPath(self: *Parameter, value: *const Value, allocator: Allocator) ![]u8 {
+        const parent_path = try self.parent.getPath(allocator);
+        defer allocator.free(parent_path);
+
+        const value_suffix = try self.findInnerPath(&self.value, value, allocator);
+        defer if (value_suffix) |suffix| allocator.free(suffix);
+
+        const total_len = parent_path.len + 1 + self.name.len + (if (value_suffix) |suffix| suffix.len else 0);
+        var result = try allocator.alloc(u8, total_len);
+
+        var pos: usize = 0;
+
+        @memcpy(result[pos..pos + parent_path.len], parent_path);
+        pos += parent_path.len;
+
+        result[pos] = '.';
+        pos += 1;
+
+        @memcpy(result[pos..pos + self.name.len], self.name);
+        pos += self.name.len;
+
+        if (value_suffix) |suffix| {
+            @memcpy(result[pos..pos + suffix.len], suffix);
+        }
+
+        return result;
+    }
+
+    fn findInnerPath(self: *Parameter, current_value: *const Value, target_value: *const Value, allocator: Allocator) !?[]u8 {
+        if (current_value == target_value) {
+            return null;
+        }
+
+        switch (current_value.*) {
+            .array => |arr| {
+                for (arr.values.items, 0..) |*item, index| {
+                    if (item == target_value) {
+                        return try std.fmt.allocPrint(allocator, "[{d}]", .{index});
+                    }
+
+                    if (try self.findInnerPath(item, target_value, allocator)) |nested_path| {
+                        defer allocator.free(nested_path);
+                        return try std.fmt.allocPrint(allocator, "[{d}]{s}", .{ index, nested_path });
+                    }
+                }
+            },
+            .i32, .i64, .f32, .string => {},
+        }
+
+        return null;
+}
+
     pub fn deinit(self: *Parameter) void {
         const allocator = self.parent.root.allocator;
         allocator.free(self.name);
