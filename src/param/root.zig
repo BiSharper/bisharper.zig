@@ -1,26 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub const ContextFlags = packed struct {
-    pending_cleanup: bool = false,
-
-    pub fn none() ContextFlags {
-        return ContextFlags{};
-    }
-
-    pub fn hasAny(self: ContextFlags, other: ContextFlags) bool {
-        const self_int: u8 = @bitCast(self);
-        const other_int: u8 = @bitCast(other);
-        return (self_int & other_int) != 0;
-    }
-
-    pub fn hasAll(self: ContextFlags, other: ContextFlags) bool {
-        const self_int: u8= @bitCast(self);
-        const other_int: u8 = @bitCast(other);
-        return (self_int & other_int) == other_int;
-    }
-};
-
 pub fn database(name: []const u8, allocator: Allocator) !*Root {
     const name_copy = try allocator.dupe(u8, name);
     errdefer allocator.free(name_copy);
@@ -46,6 +26,7 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
         .derivatives = AtomicUsize.init(0),
         .parent_refs = parent_strongs,
         .children = std.StringHashMap(*Context).init(allocator),
+        .params = std.StringHashMap(*Parameter).init(allocator),
         .root = file,
         .parent = null,
         .base = null,
@@ -56,6 +37,144 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
 
     return file;
 }
+
+fn createValue(value: anytype, alloc: Allocator) !Value {
+    const T = @TypeOf(value);
+    const type_info = @typeInfo(T);
+
+    switch (type_info) {
+        .int => |int_info| {
+            if (int_info.bits <= 32) {
+                return Value{ .i32 = @intCast(value) };
+            } else {
+                return Value{ .i64 = @intCast(value) };
+            }
+        },
+        .comptime_int => {
+            if (value <= std.math.maxInt(i32) and value >= std.math.minInt(i32)) {
+                return Value{ .i32 = @intCast(value) };
+            } else {
+                return Value{ .i64 = @intCast(value) };
+            }
+        },
+        .float, .comptime_float => {
+            return Value{ .f32 = @floatCast(value) };
+        },
+        .pointer => |ptr_info| {
+            switch (ptr_info.size) {
+                .slice => {
+                    if (ptr_info.child == u8) {
+                        // String slice - allocate owned copy
+                        const owned_str = try alloc.dupe(u8, value);
+                        return Value{ .string = owned_str };
+                    } else {
+                        // Slice of other types - convert to array
+                        var array_list = std.ArrayList(Value).init(alloc);
+                        errdefer array_list.deinit();
+
+                        for (value) |item| {
+                            const item_value = try createValue(item, alloc);
+                            try array_list.append(item_value);
+                        }
+
+                        return Value{ .array = .{ .values = array_list } };
+                    }
+                },
+                .many, .one => {
+                    if (ptr_info.child == u8) {
+                        // Null-terminated string
+                        const len = std.mem.len(value);
+                        const owned_str = try alloc.dupe(u8, value[0..len]);
+                        return Value{ .string = owned_str };
+                    }
+                    @compileError("Unsupported pointer type for parameter value");
+                },
+                else => @compileError("Unsupported pointer type for parameter value"),
+            }
+        },
+        .array => |array_info| {
+            if (array_info.child == u8) {
+                // String array - allocate owned copy
+                const owned_str = try alloc.dupe(u8, &value);
+                return Value{ .string = owned_str };
+            } else {
+                // Array of other types - convert to ArrayList
+                var array_list = std.ArrayList(Value).init(alloc);
+                errdefer array_list.deinit();
+
+                for (value) |item| {
+                    const item_value = try createValue(item, alloc);
+                    try array_list.append(item_value);
+                }
+
+                return Value{ .array = .{ .values = array_list } };
+            }
+        },
+        else => @compileError("Unsupported type for parameter value: " ++ @typeName(T)),
+    }
+}
+
+pub const AtomicUsize = std.atomic.Value(usize);
+
+pub const ContextFlags = packed struct {
+    pending_cleanup: bool = false,
+    loaded:          bool = true,
+
+    pub fn none() ContextFlags {
+        return ContextFlags{};
+    }
+
+    pub fn hasAny(self: ContextFlags, other: ContextFlags) bool {
+        const self_int: u8 = @bitCast(self);
+        const other_int: u8 = @bitCast(other);
+        return (self_int & other_int) != 0;
+    }
+
+    pub fn hasAll(self: ContextFlags, other: ContextFlags) bool {
+        const self_int: u8= @bitCast(self);
+        const other_int: u8 = @bitCast(other);
+        return (self_int & other_int) == other_int;
+    }
+};
+
+pub const Value = union(enum) {
+    i32:    i32,
+    i64:    i64,
+    f32:    f32,
+    string: []u8,
+    array:  Array,
+};
+
+pub const Array = struct {
+    values: std.ArrayList(Value),
+};
+
+pub const Parameter = struct {
+    parent:      *Context,
+    name:        []const u8,
+    value:       Value,
+
+    pub fn deinit(self: *Parameter) void {
+        const allocator = self.parent.root.allocator;
+        allocator.free(self.name);
+        deinitValue(&self.value, allocator);
+    }
+
+    fn deinitValue(self: *Value, alloc: Allocator) void {
+        switch (self.*) {
+            .string => |str| alloc.free(str),
+            .array => |arr| {
+                for (arr.values.items) |*item| {
+                    deinitValue(item, alloc);
+                }
+                arr.values.deinit();
+            },
+            // i32, i64, f32 don't need deinitialization
+            .i32, .i64, .f32 => {},
+        }
+    }
+
+};
 
 pub const Root = struct {
     allocator: Allocator,
@@ -71,19 +190,20 @@ pub const Root = struct {
     }
 
 };
-pub const AtomicUsize = std.atomic.Value(usize);
-pub const Context = struct {
-    name:        []const u8,
-    children:    std.StringHashMap(*Context),
-    root:        *Root,
-    parent:      ?*Context,
-    base:        ?*Context,
-    flags:       ContextFlags,
 
-    parent_refs: []volatile *AtomicUsize,
-    refs:        AtomicUsize,
-    derivatives: AtomicUsize,
-    mutex:       std.Thread.Mutex = .{},
+pub const Context = struct {
+    name:          []const u8,
+    children:      std.StringHashMap(*Context),
+    params:        std.StringHashMap(*Parameter),
+    root:          *Root,
+    parent:        ?*Context,
+    base:          ?*Context,
+    flags:         ContextFlags,
+
+    parent_refs:   []volatile *AtomicUsize,
+    refs:          AtomicUsize,
+    derivatives:   AtomicUsize,
+    mutex:         std.Thread.Mutex = .{},
 
     pub fn retain(self: *Context) *Context {
         var old_refs = self.refs.load(.acquire);
@@ -107,6 +227,89 @@ pub const Context = struct {
         }
 
         return self;
+    }
+
+    pub fn getPath(self: *Context, allocator: Allocator) ![]u8 {
+        var path_components = std.ArrayList([]const u8).init(allocator);
+        defer path_components.deinit();
+
+        var current: ?*Context = self;
+        while (current) |ctx| {
+            try path_components.append(ctx.name);
+            current = ctx.parent;
+        }
+
+        std.mem.reverse([]const u8, path_components.items);
+
+        var total_len: usize = 0;
+        for (path_components.items, 0..) |component, i| {
+            total_len += component.len;
+            if (i < path_components.items.len - 1) total_len += 1;
+        }
+
+        var result = try allocator.alloc(u8, total_len);
+        var pos: usize = 0;
+
+        for (path_components.items, 0..) |component, i| {
+            @memcpy(result[pos..pos + component.len], component);
+            pos += component.len;
+            if (i < path_components.items.len - 1) {
+                result[pos] = '.';
+                pos += 1;
+            }
+        }
+
+        return result;
+    }
+
+    pub fn addParameter(self: *Context, name: []const u8, value: anytype) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const alloc = self.root.allocator;
+
+        const owned_name = try alloc.dupe(u8, name);
+        errdefer alloc.free(owned_name);
+
+        const gop = try self.params.getOrPut(owned_name);
+        if (gop.found_existing) {
+            alloc.free(owned_name);
+            return error.ParameterAlreadyExists;
+        }
+
+        const param = try alloc.create(Parameter);
+        errdefer alloc.destroy(param);
+
+        const owned_value = try createValue(value, alloc);
+        errdefer Parameter.deinitValue(&owned_value, alloc);
+
+        param.* = .{
+            .parent = self,
+            .name = gop.key_ptr.*,
+            .value = owned_value,
+        };
+
+        gop.value_ptr.* = param;
+    }
+
+    pub fn removeParameter(self: *Context, name: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.params.fetchRemove(name)) |removed_entry| {
+            const param = removed_entry.value;
+            param.deinit();
+            return true;
+        }
+
+        return false;
+    }
+
+    pub fn getParameter(self: *Context, name: []const u8) ?*Parameter {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        return self.params.get(name);
     }
 
     pub fn release(self: *Context) void {
@@ -179,6 +382,7 @@ pub const Context = struct {
             .derivatives = AtomicUsize.init(0),
             .parent_refs = parent_strongs,
             .children = std.StringHashMap(*Context).init(alloc),
+            .params = std.StringHashMap(*Parameter).init(alloc),
             .root = self.root,
             .parent = self,
             .base = null,
@@ -224,8 +428,16 @@ pub const Context = struct {
         {
             self.mutex.lock();
             defer self.mutex.unlock();
+
             std.debug.assert(self.children.count() == 0);
             self.children.deinit();
+
+            var param_it = self.params.valueIterator();
+            while (param_it.next()) |param_ptr| {
+                param_ptr.*.deinit();
+            }
+
+            self.params.deinit();
         }
 
         self.root.allocator.free(@volatileCast(self.parent_refs));

@@ -350,3 +350,34 @@ test {
     std.testing.refAllDecls(RefCountTests);
     std.testing.refAllDecls(MultithreadTests);
 }
+
+test "addParameter - integer types" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const ctx = root.retain();
+    defer ctx.release();
+
+    // Test various integer types
+    try ctx.addParameter("small_int", @as(i8, 42));
+    try ctx.addParameter("medium_int", @as(i32, 1000));
+    try ctx.addParameter("large_int", @as(i64, 1000000));
+    try ctx.addParameter("comptime_int", 123);
+
+    // Verify parameters exist and have correct values
+    const small_param = ctx.getParameter("small_int").?;
+    try testing.expectEqual(@as(i32, 42), small_param.value.i32);
+
+    const medium_param = ctx.getParameter("medium_int").?;
+    try testing.expectEqual(@as(i32, 1000), medium_param.value.i32);
+
+    const large_param = ctx.getParameter("large_int").?;
+    try testing.expectEqual(@as(i64, 1000000), large_param.value.i64);
+
+    const comptime_param = ctx.getParameter("comptime_int").?;
+    try testing.expectEqual(@as(i32, 123), comptime_param.value.i32);
+}
