@@ -150,6 +150,7 @@ pub const AtomicUsize = std.atomic.Value(usize);
 
 pub const ContextFlags = packed struct {
     pending_cleanup: bool = false,
+    pending_delete:  bool = true,
     loaded:          bool = true,
 
     pub fn none() ContextFlags {
@@ -379,7 +380,6 @@ pub const Context = struct {
     derivatives:   AtomicUsize,
     rw_lock:       std.Thread.RwLock = .{},
 
-
     pub fn toSyntax(self: *Context, allocator: Allocator, indent: usize) ![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
@@ -598,6 +598,18 @@ pub const Context = struct {
             return child_ctx.retain();
         }
         return null;
+    }
+
+    pub fn removeClass(self: *Context, name: []const u8) bool {
+        self.rw_lock.lock();
+        defer self.rw_lock.unlock();
+
+        if (self.children.fetchRemove(name)) |removed_entry| {
+            removed_entry.value.flags.pending_delete = true;
+            removed_entry.value.release();
+            return true;
+        }
+        return false;
     }
 
     pub fn createClass(self: *Context, name: []const u8, extends: ?*Context) !*Context {
