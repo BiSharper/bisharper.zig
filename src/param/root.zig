@@ -340,7 +340,7 @@ pub const Context = struct {
     parent_refs:   []volatile *AtomicUsize,
     refs:          AtomicUsize,
     derivatives:   AtomicUsize,
-    mutex:         std.Thread.Mutex = .{},
+    rw_lock:       std.Thread.RwLock = .{},
 
 
     pub fn toSyntax(self: *Context, allocator: Allocator, indent: usize) ![]u8 {
@@ -362,8 +362,8 @@ pub const Context = struct {
         try result.appendSlice(" {\n");
 
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.rw_lock.lockShared();
+            defer self.rw_lock.unlockShared();
 
             var param_it = self.params.valueIterator();
             while (param_it.next()) |param_ptr| {
@@ -450,8 +450,8 @@ pub const Context = struct {
     }
 
     pub fn addParameter(self: *Context, name: []const u8, value: anytype) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rw_lock.lock();
+        defer self.rw_lock.unlock();
 
         const alloc = self.root.allocator;
 
@@ -479,8 +479,8 @@ pub const Context = struct {
     }
 
     pub fn removeParameter(self: *Context, name: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rw_lock.lock();
+        defer self.rw_lock.unlock();
 
         if (self.params.fetchRemove(name)) |removed_entry| {
             const param = removed_entry.value;
@@ -491,8 +491,8 @@ pub const Context = struct {
     }
 
     pub fn getParameter(self: *Context, name: []const u8) ?*Parameter {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rw_lock.lockShared();
+        defer self.rw_lock.unlockShared();
 
         return self.params.get(name);
     }
@@ -517,8 +517,9 @@ pub const Context = struct {
     }
 
     pub fn extend(self: *Context, new_extends: ?*Context) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rw_lock.lock();
+        defer self.rw_lock.unlock();
+
         if (self.base) |old_base| {
             _ = old_base.derivatives.rmw(.Sub, 1, .acq_rel);
             old_base.checkBaseCleanup();
@@ -541,8 +542,8 @@ pub const Context = struct {
     }
 
     pub fn createClass(self: *Context, name: []const u8, extends: ?*Context) !*Context {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.rw_lock.lock();
+        defer self.rw_lock.unlock();
 
         const alloc = self.root.allocator;
 
@@ -598,8 +599,8 @@ pub const Context = struct {
         defer children_to_deinit.deinit();
 
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.rw_lock.lockShared();
+            defer self.rw_lock.unlockShared();
             var it = self.children.valueIterator();
             while (it.next()) |child_ptr| {
                 children_to_deinit.append(child_ptr.*) catch @panic("OOM in deinit");
@@ -611,8 +612,8 @@ pub const Context = struct {
         }
 
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.rw_lock.lock();
+            defer self.rw_lock.unlock();
 
             std.debug.assert(self.children.count() == 0);
             self.children.deinit();
@@ -628,8 +629,8 @@ pub const Context = struct {
         self.root.allocator.free(@volatileCast(self.parent_refs));
 
         if (self.parent) |parent| {
-            parent.mutex.lock();
-            defer parent.mutex.unlock();
+            self.rw_lock.lock();
+            defer self.rw_lock.unlock();
 
             if (parent.children.fetchRemove(self.name)) |removed_entry| {
                 self.root.allocator.free(removed_entry.key);
