@@ -140,6 +140,10 @@ pub const Access = enum(i8) {
     ReadCreate,
     ReadOnly,
     ReadOnlyVerified,
+
+    pub fn toSyntax(self: Access, allocator: Allocator) ![]const u8 {
+        try std.fmt.allocPrint(allocator, "access = {d};", .{@intFromEnum(self)});
+    }
 };
 
 pub const AtomicUsize = std.atomic.Value(usize);
@@ -343,9 +347,6 @@ pub const Parameter = struct {
         self.value.deinit(allocator);
         allocator.destroy(self);
     }
-
-
-
 };
 
 pub const Root = struct {
@@ -396,6 +397,10 @@ pub const Context = struct {
         }
 
         try result.appendSlice(" {\n");
+
+        const s = try self.access.toSyntax(allocator);
+        defer allocator.free(s);
+        try result.appendSlice(s);
 
         {
             self.rw_lock.lockShared();
@@ -540,19 +545,13 @@ pub const Context = struct {
     pub fn getValue(self: *Context, comptime T: type, name: []const u8) ?T {
         const param = self.getParameter(name) orelse return null;
 
-        // Determine the expected tag from the compile-time type `T`.
         const expected_tag = comptime Value.typeToTag(T);
 
-        // Get the actual tag of the stored value using the correct builtin.
         const actual_tag = std.meta.activeTag(param.value);
 
-        // Compare the compile-time expected tag with the runtime actual tag.
         if (actual_tag == expected_tag) {
-            // If they match, we can safely access the corresponding field.
-            // The field name must also be evaluated at compile-time.
             return @field(param.value, @tagName(expected_tag));
         } else {
-            // The parameter exists, but it's not the type we asked for.
             return null;
         }
     }
