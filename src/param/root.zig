@@ -63,37 +63,53 @@ pub fn createValue(value: anytype, alloc: Allocator) !Value {
             switch (ptr_info.size) {
                 .slice => {
                     if (ptr_info.child == u8) {
+                        // This handles []u8
                         const owned_str = try alloc.dupe(u8, value);
                         return Value{ .string = owned_str };
                     } else {
+                        // This handles []T
                         var array_list = std.ArrayList(Value).init(alloc);
                         errdefer array_list.deinit();
-
                         for (value) |item| {
                             const item_value = try createValue(item, alloc);
                             try array_list.append(item_value);
                         }
-
                         return Value{ .array = .{ .values = array_list } };
                     }
                 },
                 .many, .one => {
+                    const Pointee = ptr_info.child;
+                    const pointee_info = @typeInfo(Pointee);
+
+                    // Handles *u8 (C-style string)
                     if (ptr_info.child == u8) {
-                        // Null-terminated string
                         const len = std.mem.len(value);
                         const owned_str = try alloc.dupe(u8, value[0..len]);
                         return Value{ .string = owned_str };
-                    } else {
-                        var array_list = std.ArrayList(Value).init(alloc);
-                        errdefer array_list.deinit();
-
-                        for (value) |item| {
-                            const item_value = try createValue(item, alloc);
-                            try array_list.append(item_value);
-                        }
-
-                        return Value{ .array = .{ .values = array_list } };
                     }
+
+                    // Handles *[N]T (pointer to an array)
+                    if (pointee_info == .array) {
+                        // Handles *[N]u8 (Zig string literal)
+                        if (pointee_info.array.child == u8) {
+                            // value.* dereferences the pointer to get the array.
+                            // &value.* creates a slice from that array.
+                            const slice = &value.*;
+                            const owned_str = try alloc.dupe(u8, slice);
+                            return Value{ .string = owned_str };
+                        } else {
+                            // Handles *[N]T where T is not u8
+                            var array_list = std.ArrayList(Value).init(alloc);
+                            errdefer array_list.deinit();
+                            // Iterate over the dereferenced array
+                            for (value.*) |item| {
+                                const item_value = try createValue(item, alloc);
+                                try array_list.append(item_value);
+                            }
+                            return Value{ .array = .{ .values = array_list } };
+                        }
+                    }
+                    @compileError("Unsupported pointer to one/many type: " ++ @typeName(T));
                 },
                 else => @compileError("Unsupported pointer type for parameter value"),
             }
@@ -156,6 +172,17 @@ pub const Value = union(enum) {
             // i32, i64, f32 don't need deinitialization
             .i32, .i64, .f32 => {},
         }
+    }
+
+    fn typeToTag(comptime T: type) std.meta.Tag(Value) {
+        return comptime blk: {
+            if (T == i32) break :blk .i32;
+            if (T == i64) break :blk .i64;
+            if (T == f32) break :blk .f32;
+            if (std.meta.eql(T, []const u8) or std.meta.eql(T, []u8)) break :blk .string;
+            if (std.meta.eql(T, Array)) break :blk .array;
+            @compileError("Unsupported type for typeToTag: " ++ @typeName(T));
+        };
     }
 
     pub fn toSyntax(self: *Value, allocator: Allocator) ![]u8 {
@@ -508,6 +535,26 @@ pub const Context = struct {
         defer self.rw_lock.unlockShared();
 
         return self.params.get(name);
+    }
+
+    pub fn getValue(self: *Context, comptime T: type, name: []const u8) ?T {
+        const param = self.getParameter(name) orelse return null;
+
+        // Determine the expected tag from the compile-time type `T`.
+        const expected_tag = comptime Value.typeToTag(T);
+
+        // Get the actual tag of the stored value using the correct builtin.
+        const actual_tag = std.meta.activeTag(param.value);
+
+        // Compare the compile-time expected tag with the runtime actual tag.
+        if (actual_tag == expected_tag) {
+            // If they match, we can safely access the corresponding field.
+            // The field name must also be evaluated at compile-time.
+            return @field(param.value, @tagName(expected_tag));
+        } else {
+            // The parameter exists, but it's not the type we asked for.
+            return null;
+        }
     }
 
     pub fn release(self: *Context) void {
