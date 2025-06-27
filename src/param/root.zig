@@ -135,16 +135,116 @@ pub const Value = union(enum) {
     f32:    f32,
     string: []u8,
     array:  Array,
+
+    fn deinit(self: *Value, alloc: Allocator) void {
+        switch (self.*) {
+            .string => |str| alloc.free(str),
+            .array => |arr| {
+                for (arr.values.items) |*item| {
+                    item.deinit(alloc);
+                }
+                arr.values.deinit();
+            },
+            // i32, i64, f32 don't need deinitialization
+            .i32, .i64, .f32 => {},
+        }
+    }
+
+    pub fn toSyntax(self: *Value, allocator: Allocator) ![]u8 {
+        var result = std.ArrayList(u8).init(allocator);
+        defer result.deinit();
+
+        switch (self.*) {
+            .i32 => |v| {
+                const s = try std.fmt.allocPrint(allocator, "{d}", .{v});
+                defer allocator.free(s);
+                try result.appendSlice(s);
+            },
+            .i64 => |v| {
+                const s = try std.fmt.allocPrint(allocator, "{d}", .{v});
+                defer allocator.free(s);
+                try result.appendSlice(s);
+            },
+            .f32 => |v| {
+                const s = try std.fmt.allocPrint(allocator, "{.6}", .{v});
+                defer allocator.free(s);
+                try result.appendSlice(s);
+            },
+            .string => |s| {
+                try result.append('"');
+                for (s) |c| {
+                    switch (c) {
+                        '"' => try result.appendSlice("\"\""),
+                        '\n' => try result.appendSlice("\" \\n \""),
+                        else => try result.append(c),
+                    }
+                }
+                try result.append('"');
+            },
+            .array => |arr| {
+                const arr_syntax = try arr.toSyntax(allocator);
+                defer allocator.free(arr_syntax);
+                try result.appendSlice(arr_syntax);
+            },
+        }
+
+        return result.toOwnedSlice();
+    }
 };
 
 pub const Array = struct {
     values: std.ArrayList(Value),
+
+    pub fn push(self: *Array, value: Value) !void {
+        try self.values.append(value);
+    }
+
+    pub fn toSyntax(self: *Array, allocator: Allocator) ![]u8 {
+        var result = std.ArrayList(u8).init(allocator);
+        defer result.deinit();
+
+        try result.append('{');
+
+        for (self.values.items, 0..) |item, index| {
+            if (index > 0) {
+                try result.append(',');
+            }
+            const next_slice = item.toSyntax(allocator);
+            try result.appendSlice(next_slice);
+            allocator.free(next_slice);
+        }
+
+        try result.append(']');
+
+        return result.toOwnedSlice();
+    }
 };
 
 pub const Parameter = struct {
     parent:      *Context,
     name:        []const u8,
     value:       Value,
+
+    pub fn toSyntax(self: *Parameter, allocator: Allocator) ![]u8 {
+        var result = std.ArrayList(u8).init(allocator);
+        defer result.deinit();
+
+        try result.appendSlice(self.name);
+
+        if(self.value == .array) {
+            try result.append("[]");
+        }
+
+        try result.appendSlice(" = ");
+
+        const value_syntax = try self.value.toSyntax(allocator);
+        defer allocator.free(value_syntax);
+
+        try result.appendSlice(value_syntax);
+        try result.append(';');
+
+        return result.toOwnedSlice();
+    }
 
     pub fn getPath(self: *Parameter, allocator: Allocator) ![]u8 {
         return self.getInnerPath(&self.value, allocator);
@@ -205,23 +305,11 @@ pub const Parameter = struct {
     pub fn deinit(self: *Parameter) void {
         const allocator = self.parent.root.allocator;
         allocator.free(self.name);
-        deinitValue(&self.value, allocator);
+        self.value.deinit(allocator);
         allocator.destroy(self);
     }
 
-    fn deinitValue(self: *Value, alloc: Allocator) void {
-        switch (self.*) {
-            .string => |str| alloc.free(str),
-            .array => |arr| {
-                for (arr.values.items) |*item| {
-                    deinitValue(item, alloc);
-                }
-                arr.values.deinit();
-            },
-            // i32, i64, f32 don't need deinitialization
-            .i32, .i64, .f32 => {},
-        }
-    }
+
 
 };
 
@@ -253,6 +341,56 @@ pub const Context = struct {
     refs:          AtomicUsize,
     derivatives:   AtomicUsize,
     mutex:         std.Thread.Mutex = .{},
+
+
+    pub fn toSyntax(self: *Context, allocator: Allocator, indent: usize) ![]u8 {
+        var result = std.ArrayList(u8).init(allocator);
+        defer result.deinit();
+
+        const indent_str = try std.fmt.allocPrint(allocator, "{s}", .{std.mem.repeat(u8, ' ', indent)});
+        defer allocator.free(indent_str);
+
+        try result.appendSlice(indent_str);
+        try result.appendSlice("class ");
+        try result.appendSlice(self.name);
+
+        if (self.base) |base| {
+            try result.appendSlice(" : ");
+            try result.appendSlice(base.name);
+        }
+
+        try result.appendSlice(" {\n");
+
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            var param_it = self.params.valueIterator();
+            while (param_it.next()) |param_ptr| {
+                const param_syntax = try param_ptr.*.toSyntax(allocator);
+                defer allocator.free(param_syntax);
+
+                try result.appendSlice(indent_str);
+                try result.appendSlice("    ");
+                try result.appendSlice(param_syntax);
+                try result.appendSlice("\n");
+            }
+
+            var child_it = self.children.valueIterator();
+            while (child_it.next()) |child_ptr| {
+                const child_syntax = try child_ptr.*.toSyntax(allocator, indent + 4);
+                defer allocator.free(child_syntax);
+
+                try result.appendSlice(child_syntax);
+                try result.appendSlice("\n");
+            }
+        }
+
+        try result.appendSlice(indent_str);
+        try result.appendSlice("};");
+
+        return result.toOwnedSlice();
+    }
 
     pub fn retain(self: *Context) *Context {
         var old_refs = self.refs.load(.acquire);
