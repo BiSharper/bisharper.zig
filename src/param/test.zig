@@ -28,11 +28,11 @@ const RefCountTests = struct {
         const root = try param.database("test_db", allocator);
         defer root.release();
 
-        try testing.expectEqual(@as(usize, 1), root.context.refs);
+        try testing.expectEqual(@as(usize, 1), root.context.refs.load(.acquire));
         try testing.expect(std.mem.eql(u8, "test_db", root.name));
         try testing.expect(root.context.parent == null);
         try testing.expect(root.context.base == null);
-        try testing.expectEqual(@as(usize, 0), root.context.derivatives);
+        try testing.expectEqual(@as(usize, 0), root.context.derivatives.load(.acquire));
     }
 
 
@@ -76,8 +76,8 @@ const RefCountTests = struct {
         defer retained_child.release();
 
         // Parent refs should be incremented (starting from index 1)
-        try testing.expectEqual(initial_root_refs + 1, root.context.refs);
-        try testing.expectEqual(initial_parent_refs + 1, parent.refs);
+        try testing.expectEqual(initial_root_refs.load(.acquire) + 1, root.context.refs.load(.acquire));
+        try testing.expectEqual(initial_parent_refs.load(.acquire) + 1, parent.refs.load(.acquire));
     }
 
 
@@ -138,7 +138,64 @@ const RefCountTests = struct {
     }
 };
 
+const MultithreadTests = struct {
+    const ThreadContext = struct {
+        root_ctx: *param.Context,
+        iterations: usize,
+    };
+
+
+    test "Concurrent retain and release" {
+        var root_db = try param.database("test_db", testing.allocator);
+        defer root_db.release();
+
+        const root_ctx = root_db.retain();
+        defer root_ctx.release();
+
+        const iterations = 100_000;
+        const num_threads = 4;
+        try testing.expectEqual(2, root_ctx.refs.load(.acquire));
+
+        var threads: [num_threads]std.Thread = undefined;
+        var thread_contexts: [num_threads]ThreadContext = undefined;
+
+        const retain_worker = struct {
+            fn retain_worker(ctx: *ThreadContext) void {
+                var i: usize = 0;
+                while (i < ctx.iterations) : (i += 1) {
+                    _ = ctx.root_ctx.retain();
+                }
+            }
+        }.retain_worker;
+
+        const release_worker = struct {
+            fn release_worker(ctx: *ThreadContext) void {
+                var i: usize = 0;
+                while (i < ctx.iterations) : (i += 1) {
+                    ctx.root_ctx.release();
+                }
+            }
+        }.release_worker;
+
+        for (0..num_threads) |i| {
+            thread_contexts[i] = .{ .root_ctx = root_ctx, .iterations = iterations };
+            if (i % 2 == 0) {
+                threads[i] = try std.Thread.spawn(.{}, retain_worker, .{&thread_contexts[i]});
+            } else {
+                threads[i] = try std.Thread.spawn(.{}, release_worker, .{&thread_contexts[i]});
+            }
+        }
+
+        for (&threads) |*t| {
+            t.join();
+        }
+        try testing.expectEqual(@as(usize, 2), root_ctx.refs.load(.acquire));
+    }
+};
+
 // Run all tests
 test {
+    //
     std.testing.refAllDecls(RefCountTests);
+    // std.testing.refAllDecls(MultithreadTests);
 }

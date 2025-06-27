@@ -31,7 +31,7 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
     const root_ctx = try allocator.create(Context);
     errdefer allocator.destroy(root_ctx);
 
-    const parent_strongs = try allocator.alloc(*usize, 1);
+    const parent_strongs = try allocator.alloc(*AtomicUsize, 1);
     errdefer allocator.free(parent_strongs);
 
     file.* = .{
@@ -42,8 +42,8 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
 
     root_ctx.* = .{
         .name = file.name,
-        .refs = 1,
-        .derivatives = 0,
+        .refs = AtomicUsize.init(1),
+        .derivatives = AtomicUsize.init(0),
         .parent_refs = parent_strongs,
         .children = std.StringHashMap(*Context).init(allocator),
         .root = file,
@@ -71,40 +71,56 @@ pub const Root = struct {
     }
 
 };
-
+pub const AtomicUsize = std.atomic.Value(usize);
 pub const Context = struct {
     name:        []const u8,
-    refs:        usize,
-    derivatives: usize,
-    parent_refs: []volatile *usize,
     children:    std.StringHashMap(*Context),
     root:        *Root,
     parent:      ?*Context,
     base:        ?*Context,
     flags:       ContextFlags,
 
-    pub fn retain(self: *Context) *Context {
-        std.debug.assert(@atomicRmw(usize, &self.refs, .Add, 1, .acq_rel) != 0);
+    parent_refs: []volatile *AtomicUsize,
+    refs:        AtomicUsize,
+    derivatives: AtomicUsize,
+    mutex:       std.Thread.Mutex = .{},
 
-        for(1..self.parent_refs.len) |i| {
-            std.debug.assert(@atomicRmw(usize, @volatileCast(self.parent_refs[i]), .Add, 1, .acq_rel) != 0);
+    pub fn retain(self: *Context) *Context {
+        var old_refs = self.refs.load(.acquire);
+        while (true) {
+            if (old_refs == 0) {
+                @panic("attempt to retain object with a zero reference count");
+            }
+
+            if(self.refs.cmpxchgWeak(
+                old_refs,
+                old_refs + 1,
+                .acq_rel,
+                .acquire,
+            )) | actual_val | {
+                old_refs = actual_val;
+            } else break;
+        }
+
+        for (1..self.parent_refs.len) |i| {
+            _ = @volatileCast(self.parent_refs[i]).rmw(.Add, 1, .acq_rel);
         }
 
         return self;
-
     }
 
     pub fn release(self: *Context) void {
-        const old_refs = @atomicRmw(usize, &self.refs, .Sub, 1, .acq_rel);
+        const old_refs = self.refs.rmw(.Sub, 1, .acq_rel);
+        std.debug.assert(old_refs != 0);
 
         if (self.parent) |_| {
             for (1..self.parent_refs.len) |i| {
-                std.debug.assert(@atomicRmw(usize, @volatileCast(self.parent_refs[i]), .Sub, 1, .acq_rel) != 0);
+                std.debug.assert(@volatileCast(self.parent_refs[i]).rmw(.Sub, 1, .acq_rel) != 0);
             }
         }
 
         if (old_refs == 1) {
-            if (@atomicLoad(usize, &self.derivatives, .acquire) > 0) {
+            if (self.derivatives.load(.acquire) > 0) {
                 self.flags.pending_cleanup = true;
                 return;
             }
@@ -115,13 +131,15 @@ pub const Context = struct {
     }
 
     pub fn extend(self: *Context, new_extends: ?*Context) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.base) |old_base| {
-            _ = @atomicRmw(usize, &old_base.derivatives, .Sub, 1, .acq_rel);
+            _ = old_base.derivatives.rmw(.Sub, 1, .acq_rel);
             old_base.checkBaseCleanup();
         }
 
         if(new_extends) |new| {
-            _ = @atomicRmw(usize, &new.derivatives, .Add, 1, .acq_rel);
+            _ = new.derivatives.rmw(.Add, 1, .acq_rel);
             self.base = new;
         } else{
             self.base = null;
@@ -129,13 +147,23 @@ pub const Context = struct {
 
     }
 
+    pub fn retainClass(self: *Context, name: []const u8) ?*Context {
+        if (self.children.get(name)) |child_ctx| {
+            return child_ctx.retain();
+        }
+        return null;
+    }
+
     pub fn createClass(self: *Context, name: []const u8, extends: ?*Context) !*Context {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         const alloc = self.root.allocator;
 
         const child_ctx = try alloc.create(Context);
         errdefer alloc.destroy(child_ctx);
 
-        const parent_strongs = try alloc.alloc(*usize, self.parent_refs.len + 1);
+        const parent_strongs = try alloc.alloc(*AtomicUsize, self.parent_refs.len + 1);
         errdefer alloc.free(parent_strongs);
 
         @memcpy(parent_strongs[1..], self.parent_refs);
@@ -149,8 +177,8 @@ pub const Context = struct {
 
         child_ctx.* = .{
             .name = gop.key_ptr.*,
-            .refs = 1,
-            .derivatives = 0,
+            .refs = AtomicUsize.init(1),
+            .derivatives = AtomicUsize.init(0),
             .parent_refs = parent_strongs,
             .children = std.StringHashMap(*Context).init(alloc),
             .root = self.root,
@@ -164,43 +192,61 @@ pub const Context = struct {
 
         gop.value_ptr.* = child_ctx;
 
-        try self.children.put(owned_name, child_ctx);
-
         return child_ctx.retain();
     }
 
     fn checkBaseCleanup(self: *Context) void {
-        if (@atomicLoad(usize, &self.derivatives, .acquire) == 0 and self.flags.pending_cleanup) {
+        if (self.derivatives.load(.acquire) == 0 and self.flags.pending_cleanup) {
             self.deinit();
         }
     }
 
     fn deinit(self: *Context) void {
         if (self.base) |base| {
-            _ = @atomicRmw(usize, &base.derivatives, .Sub, 1, .acq_rel);
-
+            _ = base.derivatives.rmw(.Sub, 1, .acq_rel);
             base.checkBaseCleanup();
         }
-        var iterator = self.children.valueIterator();
-        while (iterator.next()) |entry| entry.*.deinit();
-        self.children.deinit();
+
+        var children_to_deinit = std.ArrayList(*Context).init(self.root.allocator);
+        defer children_to_deinit.deinit();
+
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            var it = self.children.valueIterator();
+            while (it.next()) |child_ptr| {
+                children_to_deinit.append(child_ptr.*) catch @panic("OOM in deinit");
+            }
+        }
+
+        for (children_to_deinit.items) |child| {
+            child.deinit();
+        }
+
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            std.debug.assert(self.children.count() == 0);
+            self.children.deinit();
+        }
 
         self.root.allocator.free(@volatileCast(self.parent_refs));
 
-        if (self.parent == null) {
+        if (self.parent) |parent| {
+            parent.mutex.lock();
+            defer parent.mutex.unlock();
+
+            if (parent.children.fetchRemove(self.name)) |removed_entry| {
+                self.root.allocator.free(removed_entry.key);
+            }
+            self.root.allocator.destroy(self);
+        } else {
             const root_ptr = self.root;
             const allocator = self.root.allocator;
-            const root_name = self.root.name;
 
-            allocator.free(root_name);
+            allocator.free(self.root.name);
             allocator.destroy(self.root.context);
             allocator.destroy(root_ptr);
-        } else if (self.parent) |parent| {
-            if (parent.children.fetchRemove(self.name)) |entry|
-                self.root.allocator.free(entry.key) else
-                self.root.allocator.free(self.name);
-
-            self.root.allocator.destroy(self);
         }
 
     }
