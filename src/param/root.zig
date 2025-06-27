@@ -118,6 +118,14 @@ pub fn createValue(value: anytype, alloc: Allocator) !Value {
     }
 }
 
+pub const Access = enum(i8) {
+    Default = -1,
+    ReadWrite,
+    ReadCreate,
+    ReadOnly,
+    ReadOnlyVerified,
+};
+
 pub const AtomicUsize = std.atomic.Value(usize);
 
 pub const ContextFlags = packed struct {
@@ -330,6 +338,7 @@ pub const Root = struct {
 
 pub const Context = struct {
     name:          []const u8,
+    access:        Access = .Default,
     children:      std.StringHashMap(*Context),
     params:        std.StringHashMap(*Parameter),
     root:          *Root,
@@ -454,6 +463,10 @@ pub const Context = struct {
         defer self.rw_lock.unlock();
 
         const alloc = self.root.allocator;
+
+        if(std.mem.eql(u8, name, "access")) {
+            return error.ReservedParameterName;
+        }
 
         const owned_name = try alloc.dupe(u8, name);
         errdefer alloc.free(owned_name);
