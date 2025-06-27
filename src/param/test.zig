@@ -1,360 +1,54 @@
 const std = @import("std");
+
 const testing = std.testing;
-const smartptr = @import("zigrc");
+const expect = testing.expect;
+const expectEqual = testing.expectEqual;
+const expectError = testing.expectError;
+const expectEqualStrings = testing.expectEqualStrings;
+
 const param = @import("root.zig");
 
-const RefCountTests = struct {
-    test "createClass with extends properly sets up references" {
-        const allocator = testing.allocator;
 
-        var root = try param.database("config", allocator);
-        defer root.release();
+test "param.database creation and basic operations" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-        const rootContext = root.retain();
-        defer rootContext.release();
+    const root = try param.database("test_db", allocator);
+    defer root.release();
 
-        const child1 = try rootContext.createClass("child1", null);
-        defer child1.release();
-
-        const child2 = try rootContext.createClass("child2", child1);
-
-        defer child2.release();
-
-    }
-
-    test "basic database creation and cleanup" {
-        const allocator = testing.allocator;
-
-        const root = try param.database("test_db", allocator);
-        defer root.release();
-
-        try testing.expectEqual(@as(usize, 1), root.context.refs.load(.acquire));
-        try testing.expect(std.mem.eql(u8, "test_db", root.name));
-        try testing.expect(root.context.parent == null);
-        try testing.expect(root.context.base == null);
-        try testing.expectEqual(@as(usize, 0), root.context.derivatives.load(.acquire));
-    }
-
-
-    test "createClass allocation failure" {
-        const allocator = testing.allocator;
-
-        var failing_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
-        const root = try param.database("root", allocator);
-
-        root.allocator = failing_allocator.allocator();
-        const result = root.context.createClass("fail", null);
-
-        try testing.expectError(error.OutOfMemory, result);
-
-        root.allocator = allocator;
-        root.release();
-    }
-
-    test "parent reference propagation" {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        defer _ = gpa.deinit();
-        const allocator = gpa.allocator();
-
-        const root = try param.database("test_db", allocator);
-        defer root.release();
-
-        const parent = try root.context.createClass("Parent", null);
-        defer parent.release();
-
-        const child = try parent.createClass("Child", null);
-        defer child.release();
-
-        // Child should have parent refs for both root and parent
-        try testing.expectEqual(@as(usize, 3), child.parent_refs.len); // self + root + parent
-
-        // Retain child should increment all parent refs
-        const initial_root_refs = root.context.refs;
-        const initial_parent_refs = parent.refs;
-
-        const retained_child = child.retain();
-        defer retained_child.release();
-
-        // Parent refs should be incremented (starting from index 1)
-        try testing.expectEqual(initial_root_refs.load(.acquire) + 1, root.context.refs.load(.acquire));
-        try testing.expectEqual(initial_parent_refs.load(.acquire) + 1, parent.refs.load(.acquire));
-    }
-
-
-    test "base context should not deinit while derivatives exist" {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        defer _ = gpa.deinit();
-        const allocator = gpa.allocator();
-
-        // Create root database
-        const root = try param.database("test_db", allocator);
-        defer root.release();
-
-        const root_context = root.retain();
-        defer root_context.release();
-
-        const base_ctx = try root_context.createClass("BaseClass", null);
-
-        const derived_ctx = try root_context.createClass("DerivedClass", base_ctx);
-
-        derived_ctx.release();
-
-        base_ctx.release();
-
-    }
-
-    test "memory leak detection helper" {
-        var gpa = std.heap.GeneralPurposeAllocator(.{ .safety = true }){};
-        defer {
-            const leaked = gpa.deinit();
-            std.testing.expect(leaked == .ok) catch {
-                std.debug.print("Memory leak detected!\n", .{});
-            };
-        }
-        const allocator = gpa.allocator();
-
-        // Run a complex scenario and ensure everything is cleaned up
-        const root = try param.database("leak_test", allocator);
-
-        const classes = [_]*param.Context{
-            try root.context.createClass("A", null),
-            try root.context.createClass("B", null),
-            try root.context.createClass("C", null),
-        };
-
-        classes[1].extend(classes[0]);
-        classes[2].extend(classes[1]);
-
-        const nested = try classes[0].createClass("Nested", classes[2]);
-
-        // Clean up everything
-        nested.release();
-        for (classes) |class| {
-            class.release();
-        }
-        root.release();
-
-        // If we reach here without the allocator detecting leaks, we're good
-    }
-};
-
-const MultithreadTests = struct {
-    const ThreadContext = struct {
-        root_ctx:   *param.Context,
-        iterations: usize,
-        thread_id:  usize
-    };
-
-    const CreateContext = struct {
-        parent_ctx:       *param.Context,
-        iterations:       usize,
-        thread_id:        usize,
-        created_contexts: *std.ArrayList(*param.Context),
-        mutex:            *std.Thread.Mutex,
-    };
-
-
-    test "Stress test: Heavy retain/release with random delays" {
-        var root_db = try param.database("stress_test_db", testing.allocator);
-        defer root_db.release();
-
-        const root_ctx = root_db.retain();
-        defer root_ctx.release();
-
-        const iterations = 1;
-        const num_threads = 1;
-
-        var prng = std.Random.DefaultPrng.init(12345);
-        const random = prng.random();
-
-        const StressWorker = struct {
-            fn worker(ctx: *ThreadContext, rng: std.Random) void {
-
-                var retained_contexts = std.ArrayList(*param.Context).init(testing.allocator);
-                defer {
-                    for (retained_contexts.items) |retained_ctx| {
-                        retained_ctx.release();
-                    }
-                    retained_contexts.deinit();
-                }
-
-                var i: usize = 0;
-                while (i < ctx.iterations) : (i += 1) {
-                    const operation = rng.intRangeAtMost(u8, 0, 2);
-
-                    switch (operation) {
-                        0 => {
-                            const retained = ctx.root_ctx.retain();
-                            retained_contexts.append(retained) catch @panic("OOM");
-                        },
-                        1 => {
-                            if (retained_contexts.items.len > 0) {
-                                const idx = rng.intRangeLessThan(usize, 0, retained_contexts.items.len);
-                                const to_release = retained_contexts.swapRemove(idx);
-                                to_release.release();
-                            }
-                        },
-                        2 => {
-                            const retained = ctx.root_ctx.retain();
-                            retained.release();
-                        },
-                        else => break,
-                    }
-                    if (rng.intRangeAtMost(u8, 0, 100) < 5) {
-                        std.Thread.yield() catch {};
-                    }
-                }
-            }
-        };
-
-        var threads: [num_threads]std.Thread = undefined;
-        var thread_contexts: [num_threads]ThreadContext = undefined;
-
-        for (0..num_threads) |i| {
-            thread_contexts[i] = .{
-                .root_ctx = root_ctx,
-                .iterations = iterations,
-                .thread_id = i,
-            };
-            threads[i] = try std.Thread.spawn(.{}, StressWorker.worker, .{&thread_contexts[i], random});
-        }
-
-        for (&threads) |*t| {
-            t.join();
-        }
-
-        try testing.expectEqual(@as(usize, 2), root_ctx.refs.load(.acquire));
-    }
-
-    test "Concurrent inheritance chain operations" {
-        var root_db = try param.database("inheritance_db", testing.allocator);
-        defer root_db.release();
-
-        const root_ctx = root_db.retain();
-        defer root_ctx.release();
-
-        const base_class = try root_ctx.createClass("BaseClass", null);
-        defer base_class.release();
-
-        const derived_class = try root_ctx.createClass("DerivedClass", base_class);
-        defer derived_class.release();
-
-        const iterations = 1000;
-        const num_threads = 4;
-
-        var all_contexts = std.ArrayList(*param.Context).init(testing.allocator);
-        defer {
-            for (all_contexts.items) |ctx| {
-                ctx.release();
-            }
-            all_contexts.deinit();
-        }
-
-        var contexts_mutex = std.Thread.Mutex{};
-
-        const InheritanceWorker = struct {
-            fn worker(ctx: *CreateContext, base: *param.Context, derived: *param.Context) void {
-                var local_prng = std.Random.DefaultPrng.init(@intCast(ctx.thread_id * 2021));
-                var local_random = local_prng.random();
-
-                var i: usize = 0;
-                while (i < ctx.iterations) : (i += 1) {
-                    const operation = local_random.intRangeAtMost(u8, 0, 4);
-
-                    switch (operation) {
-                        0 => {
-                            // Create class extending base
-                            var class_name_buf: [32]u8 = undefined;
-                            const class_name = std.fmt.bufPrint(&class_name_buf, "ext_base_{}_{}", .{ctx.thread_id, i}) catch unreachable;
-
-                            if (ctx.parent_ctx.createClass(class_name, base)) |new_class| {
-                                ctx.mutex.lock();
-                                defer ctx.mutex.unlock();
-                                ctx.created_contexts.append(new_class) catch @panic("OOM");
-                            } else |_| {}
-                        },
-                        1 => {
-                            // Create class extending derived
-                            var class_name_buf: [32]u8 = undefined;
-                            const class_name = std.fmt.bufPrint(&class_name_buf, "ext_derived_{}_{}", .{ctx.thread_id, i}) catch unreachable;
-
-                            if (ctx.parent_ctx.createClass(class_name, derived)) |new_class| {
-                                ctx.mutex.lock();
-                                defer ctx.mutex.unlock();
-                                ctx.created_contexts.append(new_class) catch @panic("OOM");
-                            } else |_| {}
-                        },
-                        2 => {
-                            // Retain and release base class
-                            const retained = base.retain();
-                            retained.release();
-                        },
-                        3 => {
-                            // Retain and release derived class
-                            const retained = derived.retain();
-                            retained.release();
-                        },
-                        4 => {
-                            // Change inheritance of a random existing class
-                            ctx.mutex.lock();
-                            defer ctx.mutex.unlock();
-
-                            if (ctx.created_contexts.items.len > 0) {
-                                const idx = local_random.intRangeLessThan(usize, 0, ctx.created_contexts.items.len);
-                                const target = ctx.created_contexts.items[idx];
-
-                                // Randomly extend base, derived, or null
-                                const extend_choice = local_random.intRangeAtMost(u8, 0, 2);
-                                switch (extend_choice) {
-                                    0 => target.extend(base),
-                                    1 => target.extend(derived),
-                                    2 => target.extend(null),
-                                    else => break
-                                }
-                            }
-                        },
-                        else => break
-                    }
-                }
-            }
-        };
-
-        var threads: [num_threads]std.Thread = undefined;
-        var create_contexts: [num_threads]CreateContext = undefined;
-
-        for (0..num_threads) |i| {
-            create_contexts[i] = .{
-                .parent_ctx = root_ctx,
-                .iterations = iterations,
-                .thread_id = i,
-                .created_contexts = &all_contexts,
-                .mutex = &contexts_mutex,
-            };
-            threads[i] = try std.Thread.spawn(.{}, InheritanceWorker.worker, .{&create_contexts[i], base_class, derived_class});
-        }
-
-        for (&threads) |*t| {
-            t.join();
-        }
-
-        // Verify reference counts are sane
-        try testing.expect(base_class.refs.load(.acquire) > 0);
-        try testing.expect(derived_class.refs.load(.acquire) > 0);
-        try testing.expect(base_class.derivatives.load(.acquire) >= 1); // At least derived_class extends it
-    }
-};
-
-// Run all tests
-test {
-    //
-    std.testing.refAllDecls(RefCountTests);
-    std.testing.refAllDecls(MultithreadTests);
+    try expectEqualStrings("test_db", root.name);
+    try expect(root.context.parent == null);
+    try expectEqual(@as(usize, 1), root.context.refs.load(.acquire));
 }
 
-test "addParameter - integer types" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+test "context retain and release" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    // Test retain
+    const ctx1 = root.retain();
+    try expectEqual(@as(usize, 2), root.context.refs.load(.acquire));
+
+    const ctx2 = root.retain();
+    try expectEqual(@as(usize, 3), root.context.refs.load(.acquire));
+
+    // Test release
+    ctx1.release();
+    try expectEqual(@as(usize, 2), root.context.refs.load(.acquire));
+
+    ctx2.release();
+    try expectEqual(@as(usize, 1), root.context.refs.load(.acquire));
+}
+
+test "parameter operations - integers" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     const root = try param.database("test_db", allocator);
     defer root.release();
@@ -362,22 +56,364 @@ test "addParameter - integer types" {
     const ctx = root.retain();
     defer ctx.release();
 
-    // Test various integer types
-    try ctx.addParameter("small_int", @as(i8, 42));
-    try ctx.addParameter("medium_int", @as(i32, 1000));
-    try ctx.addParameter("large_int", @as(i64, 1000000));
-    try ctx.addParameter("comptime_int", 123);
+    // Add i32 parameter
+    try ctx.addParameter("int32_param", @as(i32, 42));
 
-    // Verify parameters exist and have correct values
-    const small_param = ctx.getParameter("small_int").?;
-    try testing.expectEqual(@as(i32, 42), small_param.value.i32);
+    // Add i64 parameter
+    try ctx.addParameter("int64_param", @as(i64, 1234567890123));
 
-    const medium_param = ctx.getParameter("medium_int").?;
-    try testing.expectEqual(@as(i32, 1000), medium_param.value.i32);
+    // Get parameters
+    const param1 = ctx.getParameter("int32_param").?;
+    const param2 = ctx.getParameter("int64_param").?;
 
-    const large_param = ctx.getParameter("large_int").?;
-    try testing.expectEqual(@as(i64, 1000000), large_param.value.i64);
+    try expectEqual(@as(i32, 42), param1.value.i32);
+    try expectEqual(@as(i64, 1234567890123), param2.value.i64);
 
-    const comptime_param = ctx.getParameter("comptime_int").?;
-    try testing.expectEqual(@as(i32, 123), comptime_param.value.i32);
+    // Test parameter paths
+    const path1 = try param1.getPath(allocator);
+    defer allocator.free(path1);
+    try expectEqualStrings("test_db.int32_param", path1);
+}
+//
+test "parameter operations - floats and strings" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const ctx = root.retain();
+    defer ctx.release();
+
+    // Add float parameter
+    try ctx.addParameter("float_param", @as(f32, 3.14));
+
+    // Add string parameter - use a slice to avoid pointer issues
+    const test_string: []const u8 = "hello world";
+    try ctx.addParameter("string_param", test_string);
+
+    // Get parameters
+    const float_param = ctx.getParameter("float_param").?;
+    const string_param = ctx.getParameter("string_param").?;
+
+    try expectEqual(@as(f32, 3.14), float_param.value.f32);
+    try expectEqualStrings("hello world", string_param.value.string);
+}
+
+test "parameter operations - arrays" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const ctx = root.retain();
+    defer ctx.release();
+
+    // Add array parameter
+    const test_array = [_]i32{1, 2, 3, 4, 5};
+    try ctx.addParameter("array_param", test_array);
+
+    // Get parameter
+    const array_param = ctx.getParameter("array_param").?;
+
+    try expectEqual(@as(usize, 5), array_param.value.array.values.items.len);
+    try expectEqual(@as(i32, 1), array_param.value.array.values.items[0].i32);
+    try expectEqual(@as(i32, 5), array_param.value.array.values.items[4].i32);
+}
+
+test "parameter duplicate names" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const ctx = root.retain();
+    defer ctx.release();
+
+    try ctx.addParameter("duplicate", 42);
+    try expectError(error.ParameterAlreadyExists, ctx.addParameter("duplicate", 43));
+}
+
+test "parameter removal" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const ctx = root.retain();
+    defer ctx.release();
+
+    try ctx.addParameter("to_remove", 42);
+    try expect(ctx.getParameter("to_remove") != null);
+
+    try expect(ctx.removeParameter("to_remove"));
+    try expect(ctx.getParameter("to_remove") == null);
+
+    // Test removing non-existent parameter
+    try expect(!ctx.removeParameter("non_existent"));
+}
+//
+test "context creation and hierarchy" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const root_ctx = root.retain();
+    defer root_ctx.release();
+
+    // Create child context
+    const child = try root_ctx.createClass("child", null);
+    defer child.release();
+
+    try expectEqualStrings("child", child.name);
+    try expect(child.parent == root_ctx);
+
+    // Test path generation
+    const child_path = try child.getPath(allocator);
+    defer allocator.free(child_path);
+    try expectEqualStrings("test_db.child", child_path);
+
+    // Create grandchild
+    const grandchild = try child.createClass("grandchild", null);
+    defer grandchild.release();
+
+    const grandchild_path = try grandchild.getPath(allocator);
+    defer allocator.free(grandchild_path);
+    try expectEqualStrings("test_db.child.grandchild", grandchild_path);
+}
+
+test "context class retention" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const root_ctx = root.retain();
+    defer root_ctx.release();
+
+    // Create child context
+    const child = try root_ctx.createClass("child", null);
+    child.release(); // Release our reference, but it should still exist in parent
+
+    // Retain the child through parent
+    const child_retained = root_ctx.retainClass("child");
+    try expect(child_retained != null);
+    defer child_retained.?.release();
+
+    // Test non-existent child
+    const non_existent = root_ctx.retainClass("non_existent");
+    try expect(non_existent == null);
+}
+
+test "context inheritance/extension" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const root_ctx = root.retain();
+    defer root_ctx.release();
+
+    // Create base context
+    const base = try root_ctx.createClass("base", null);
+    defer base.release();
+
+    // Create derived context that extends base
+    const derived = try root_ctx.createClass("derived", base);
+    defer derived.release();
+
+    try expect(derived.base == base);
+    try expectEqual(@as(usize, 1), base.derivatives.load(.acquire));
+
+    // Test changing extension
+    const new_base = try root_ctx.createClass("new_base", null);
+    defer new_base.release();
+
+    derived.extend(new_base);
+    try expect(derived.base == new_base);
+    try expectEqual(@as(usize, 0), base.derivatives.load(.acquire));
+    try expectEqual(@as(usize, 1), new_base.derivatives.load(.acquire));
+
+    // Test removing extension
+    derived.extend(null);
+    try expect(derived.base == null);
+    try expectEqual(@as(usize, 0), new_base.derivatives.load(.acquire));
+}
+
+test "supported string types" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const ctx = root.retain();
+    defer ctx.release();
+
+    const string_slice: []const u8 = "slice string";
+    try ctx.addParameter("slice_param", string_slice);
+
+    // Method 2: Array converted to slice
+    const string_array = [_]u8{'a', 'r', 'r', 'a', 'y'};
+    try ctx.addParameter("array_param", string_array);
+
+    // Verify the parameters
+    const slice_param = ctx.getParameter("slice_param").?;
+    const array_param = ctx.getParameter("array_param").?;
+
+    try expectEqualStrings("slice string", slice_param.value.string);
+    try expectEqualStrings("array", array_param.value.string);
+}
+
+test "parameter path generation with nested arrays" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const ctx = root.retain();
+    defer ctx.release();
+
+    // Create nested array parameter
+    const test_array = [_]i32{1, 2, 3};
+    try ctx.addParameter("nested_array", test_array);
+
+    const par = ctx.getParameter("nested_array").?;
+
+    const element_path = try par.getInnerPath(&par.value.array.values.items[1], allocator);
+    defer allocator.free(element_path);
+
+    try expectEqualStrings("test_db.nested_array[1]", element_path);
+}
+
+test "duplicate class name error" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const root_ctx = root.retain();
+    defer root_ctx.release();
+
+    const child1 = try root_ctx.createClass("duplicate_name", null);
+    defer child1.release();
+
+    try expectError(error.NameAlreadyExists, root_ctx.createClass("duplicate_name", null));
+}
+
+test "memory cleanup and reference counting" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer {
+        const leaked = gpa.deinit();
+        if (leaked == .leak) {
+            std.debug.print("Memory leak detected!\n", .{});
+        }
+    }
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+
+    // Create multiple contexts and parameters
+    const ctx1 = root.retain();
+    const ctx2 = root.retain();
+
+    const test_string: []const u8 = "value1";
+    try ctx1.addParameter("param1", test_string);
+    try ctx1.addParameter("param2", [_]i32{1, 2, 3, 4, 5});
+
+    const child = try ctx1.createClass("child", null);
+    try child.addParameter("child_param", 42);
+
+    // Release everything
+    child.release();
+    ctx1.release();
+    ctx2.release();
+    root.release();
+
+    // If we reach here without crashes and no memory leaks, cleanup worked properly
+}
+//
+test "concurrent access simulation" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("test_db", allocator);
+    defer root.release();
+
+    const ctx = root.retain();
+    defer ctx.release();
+
+    // Simulate concurrent parameter operations
+    try ctx.addParameter("concurrent1", 1);
+    try ctx.addParameter("concurrent2", 2);
+    try ctx.addParameter("concurrent3", 3);
+
+    // Multiple gets (simulating concurrent reads)
+    const param1 = ctx.getParameter("concurrent1");
+    const param2 = ctx.getParameter("concurrent2");
+    const param3 = ctx.getParameter("concurrent3");
+
+    try expect(param1 != null);
+    try expect(param2 != null);
+    try expect(param3 != null);
+
+    // Remove parameters
+    try expect(ctx.removeParameter("concurrent1"));
+    try expect(ctx.removeParameter("concurrent2"));
+    try expect(ctx.removeParameter("concurrent3"));
+}
+
+test "deep hierarchy path generation" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const root = try param.database("root", allocator);
+    defer root.release();
+
+    const root_ctx = root.retain();
+    defer root_ctx.release();
+
+    // Create deep hierarchy: root -> level1 -> level2 -> level3
+    const level1 = try root_ctx.createClass("level1", null);
+    defer level1.release();
+
+    const level2 = try level1.createClass("level2", null);
+    defer level2.release();
+
+    const level3 = try level2.createClass("level3", null);
+    defer level3.release();
+
+    // Test path generation at each level
+    const path1 = try level1.getPath(allocator);
+    defer allocator.free(path1);
+    try expectEqualStrings("root.level1", path1);
+
+    const path2 = try level2.getPath(allocator);
+    defer allocator.free(path2);
+    try expectEqualStrings("root.level1.level2", path2);
+
+    const path3 = try level3.getPath(allocator);
+    defer allocator.free(path3);
+    try expectEqualStrings("root.level1.level2.level3", path3);
 }

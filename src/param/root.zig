@@ -38,10 +38,9 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
     return file;
 }
 
-fn createValue(value: anytype, alloc: Allocator) !Value {
+pub fn createValue(value: anytype, alloc: Allocator) !Value {
     const T = @TypeOf(value);
     const type_info = @typeInfo(T);
-
     switch (type_info) {
         .int => |int_info| {
             if (int_info.bits <= 32) {
@@ -64,11 +63,9 @@ fn createValue(value: anytype, alloc: Allocator) !Value {
             switch (ptr_info.size) {
                 .slice => {
                     if (ptr_info.child == u8) {
-                        // String slice - allocate owned copy
                         const owned_str = try alloc.dupe(u8, value);
                         return Value{ .string = owned_str };
                     } else {
-                        // Slice of other types - convert to array
                         var array_list = std.ArrayList(Value).init(alloc);
                         errdefer array_list.deinit();
 
@@ -86,19 +83,26 @@ fn createValue(value: anytype, alloc: Allocator) !Value {
                         const len = std.mem.len(value);
                         const owned_str = try alloc.dupe(u8, value[0..len]);
                         return Value{ .string = owned_str };
+                    } else {
+                        var array_list = std.ArrayList(Value).init(alloc);
+                        errdefer array_list.deinit();
+
+                        for (value) |item| {
+                            const item_value = try createValue(item, alloc);
+                            try array_list.append(item_value);
+                        }
+
+                        return Value{ .array = .{ .values = array_list } };
                     }
-                    @compileError("Unsupported pointer type for parameter value");
                 },
                 else => @compileError("Unsupported pointer type for parameter value"),
             }
         },
         .array => |array_info| {
             if (array_info.child == u8) {
-                // String array - allocate owned copy
-                const owned_str = try alloc.dupe(u8, &value);
+                const owned_str = try alloc.dupe(u8, value[0..]);
                 return Value{ .string = owned_str };
             } else {
-                // Array of other types - convert to ArrayList
                 var array_list = std.ArrayList(Value).init(alloc);
                 errdefer array_list.deinit();
 
@@ -123,18 +127,6 @@ pub const ContextFlags = packed struct {
     pub fn none() ContextFlags {
         return ContextFlags{};
     }
-
-    pub fn hasAny(self: ContextFlags, other: ContextFlags) bool {
-        const self_int: u8 = @bitCast(self);
-        const other_int: u8 = @bitCast(other);
-        return (self_int & other_int) != 0;
-    }
-
-    pub fn hasAll(self: ContextFlags, other: ContextFlags) bool {
-        const self_int: u8= @bitCast(self);
-        const other_int: u8 = @bitCast(other);
-        return (self_int & other_int) == other_int;
-    }
 };
 
 pub const Value = union(enum) {
@@ -155,7 +147,7 @@ pub const Parameter = struct {
     value:       Value,
 
     pub fn getPath(self: *Parameter, allocator: Allocator) ![]u8 {
-        return self.getInnerPath(self.value, allocator);
+        return self.getInnerPath(&self.value, allocator);
     }
 
     pub fn getInnerPath(self: *Parameter, value: *const Value, allocator: Allocator) ![]u8 {
@@ -214,6 +206,7 @@ pub const Parameter = struct {
         const allocator = self.parent.root.allocator;
         allocator.free(self.name);
         deinitValue(&self.value, allocator);
+        allocator.destroy(self);
     }
 
     fn deinitValue(self: *Value, alloc: Allocator) void {
@@ -329,7 +322,6 @@ pub const Context = struct {
 
         const gop = try self.params.getOrPut(owned_name);
         if (gop.found_existing) {
-            alloc.free(owned_name);
             return error.ParameterAlreadyExists;
         }
 
@@ -357,7 +349,6 @@ pub const Context = struct {
             param.deinit();
             return true;
         }
-
         return false;
     }
 
