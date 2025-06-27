@@ -8,6 +8,152 @@ const expectEqualStrings = testing.expectEqualStrings;
 
 const param = @import("root.zig");
 
+test "simple retain/release stress" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try param.database("test_db", allocator);
+    const ctx = root.retain();
+
+    const num_workers = 3;
+    const SharedState = struct {
+        ctx: *param.Context,
+        iterations: usize,
+
+        // Synchronization state
+        mutex: std.Thread.Mutex = .{},
+        cond: std.Thread.Condition = .{},
+        wait_count: usize = 0,
+        thread_count: usize = num_workers + 1, // workers + main thread
+    };
+
+    var state = SharedState{
+        .ctx = ctx,
+        .iterations = 1000,
+    };
+
+    const Sync = struct {
+        // A reusable barrier implementation.
+        fn barrierWait(s: *SharedState) void {
+            s.mutex.lock();
+            defer s.mutex.unlock();
+
+            s.wait_count += 1;
+            if (s.wait_count < s.thread_count) {
+                while (s.wait_count < s.thread_count) {
+                    s.cond.wait(&s.mutex);
+                }
+            } else {
+                s.cond.broadcast();
+            }
+        }
+    };
+
+    const Worker = struct {
+        fn run(s: *SharedState) void {
+            Sync.barrierWait(s); // Wait for the "go" signal
+            var i: usize = 0;
+            while (i < s.iterations) : (i += 1) {
+                _ = s.ctx.retain();
+                s.ctx.release();
+            }
+        }
+    };
+
+    var threads: [num_workers]?std.Thread = .{null} ** num_workers;
+    for (&threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, Worker.run, .{&state});
+    }
+
+    Sync.barrierWait(&state); // Unleash the workers
+
+    for (threads) |t| {
+        t.?.join();
+    }
+
+    try testing.expectEqual(@as(usize, 2), ctx.refs.load(.acquire));
+    ctx.release();
+}
+
+test "hierarchical retain/release stress" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try param.database("test_db", allocator);
+    const root_ctx = root.retain(); // root.context ref count -> 2
+    defer root_ctx.release(); // Balances the retain above
+
+    // createClass returns a retained context, so child_ctx has ref count 1.
+    const child_ctx = try root_ctx.createClass("child", null);
+    defer child_ctx.release();
+
+    // grandchild_ctx also has ref count 1.
+    const grandchild_ctx = try child_ctx.createClass("grandchild", null);
+    defer grandchild_ctx.release();
+
+    const num_workers = 3;
+    const SharedState = struct {
+        grandchild: *param.Context,
+        iterations: usize,
+        mutex: std.Thread.Mutex = .{},
+        cond: std.Thread.Condition = .{},
+        wait_count: usize = 0,
+        thread_count: usize = num_workers + 1,
+    };
+
+    var state = SharedState{
+        .grandchild = grandchild_ctx,
+        .iterations = 1000,
+    };
+
+    const Sync = struct {
+        fn barrierWait(s: *SharedState) void {
+            s.mutex.lock();
+            defer s.mutex.unlock();
+            s.wait_count += 1;
+            if (s.wait_count == s.thread_count) {
+                s.cond.broadcast();
+            } else {
+                while (s.wait_count < s.thread_count) s.cond.wait(&s.mutex);
+            }
+        }
+    };
+
+    const Worker = struct {
+        fn run(s: *SharedState) void {
+            Sync.barrierWait(s);
+            var i: usize = 0;
+            while (i < s.iterations) : (i += 1) {
+                _ = s.grandchild.retain();
+                s.grandchild.release();
+            }
+        }
+    };
+
+    var threads: [num_workers]?std.Thread = .{null} ** num_workers;
+    for (&threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, Worker.run, .{&state});
+    }
+
+    Sync.barrierWait(&state);
+
+    for (threads) |t| {
+        t.?.join();
+    }
+
+    // Retaining a grandchild also retains parents. The net effect of workers is 0.
+    // So counts should be what they were before workers started.
+    try testing.expectEqual(@as(usize, 2), grandchild_ctx.refs.load(.acquire));
+    try testing.expectEqual(@as(usize, 3), child_ctx.refs.load(.acquire));
+    // root_ctx has its own reference + the master reference.
+    try testing.expectEqual(@as(usize, 4), root_ctx.refs.load(.acquire));
+
+    // The three defers will run, releasing the contexts in reverse order.
+    // Finally, release the master reference.
+    root.release();
+}
 
 test "param.database creation and basic operations" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -74,7 +220,7 @@ test "parameter operations - integers" {
     defer allocator.free(path1);
     try expectEqualStrings("test_db.int32_param", path1);
 }
-//
+
 test "parameter operations - floats and strings" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -159,7 +305,7 @@ test "parameter removal" {
     // Test removing non-existent parameter
     try expect(!ctx.removeParameter("non_existent"));
 }
-//
+
 test "context creation and hierarchy" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -351,7 +497,7 @@ test "memory cleanup and reference counting" {
 
     // If we reach here without crashes and no memory leaks, cleanup worked properly
 }
-//
+
 test "concurrent access simulation" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
