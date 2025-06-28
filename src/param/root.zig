@@ -38,6 +38,19 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
     return file;
 }
 
+
+pub fn parse(name: []const u8, content: []const u8, allocator: Allocator) !*Root {
+    const root = try database(name, allocator);
+    errdefer root.release();
+
+    const context: *Context = root.retain();
+    defer context.release();
+    
+    try context.parse(content, false);
+    
+    return root;
+}
+
 pub fn createValue(value: anytype, alloc: Allocator) !Value {
     const T = @TypeOf(value);
     const type_info = @typeInfo(T);
@@ -369,472 +382,8 @@ pub const Root = struct {
         self.context.release();
     }
 
-    pub fn parseContext(root: *Root, input: []const u8, line: *usize, line_start: *usize) ![]const AstNode {
-        var index: usize = 0;
-        var nodes = std.ArrayList(AstNode).init(root.allocator);
 
-        while (index < input.len) {
-            skipWhitespace(input, index, line, line_start);
-
-
-            const c = input[index];
-
-            if(c == '#') {
-                //todo
-            }
-
-            if(c == '}') {
-                index += 1;
-
-                break;
-            }
-
-            var word = getAlphaWord(input, &index, line, line_start);
-            if (std.mem.eql(u8, word, "delete")) {
-                word = getAlphaWord(input, &index, line, line_start);
-
-                skipWhitespace(input, index, line, line_start);
-
-                if (input[index] != ';') {
-                    std.log.err("Error at line {}, col {}: expected ';' after 'delete' statement.", .{line.*, index - line_start.*});
-                    return error.SyntaxError;
-                }
-                index += 1;
-
-                try nodes.append(.{ .delete = word });
-
-            } else if (std.mem.eql(u8, word, "class")) {
-                const class_name = getAlphaWord(input, &index);
-
-                skipWhitespace(input, index, line, line_start);
-
-                if (input[index] == ';') {
-                    index += 1;
-
-                    try nodes.append(.{ .classs = .{ .name = class_name, .extends = null, .nodes = null } });
-                } else {
-                    var extends_name: ?[]const u8 = null;
-                    if(input[index] == ':') {
-                        index += 1;
-                        extends_name = getAlphaWord(input, &index);
-                    }
-                    skipWhitespace(input, index, line, line_start);
-
-                    if(input[index] != '{') {
-                        if(extends_name != null) {
-                            std.log.err("Error at line {}, col {}: expected '{{' after class declaration.", .{line.*, index - line_start.*});
-                        } else {
-                            std.log.err("Error at line {}, col {}: expected ';' or '{{' after class declaration.", .{line.*, index - line_start.*});
-                        }
-                        return error.SyntaxError;
-                    }
-                    index += 1;
-
-                    try nodes.append(.{
-                        .classs = .{
-                            .name = class_name,
-                            .extends = extends_name,
-                            .nodes = try root.parseContext(input[index], line, line_start)
-                        }
-                    });
-                }
-            } else {
-                if (input[index] == '[') {
-                    index += 1;
-
-                    skipWhitespace(input, index, line, line_start);
-
-                    if (input[index] != ']') {
-                        std.log.err("Error at line {}, col {}: expected ']' or whitespace after '['", .{line.*, index - line_start.*});
-                        return error.SyntaxError;
-                    }
-                    index += 1;
-                    skipWhitespace(input, index, line, line_start);
-                    const operator: AstNode.AstArray.Operator = blk: switch (input[index]) {
-                        '+' => {
-                            index += 1;
-
-                            if(input[index] != '=') {
-                                std.log.err("Error at line {}, col {}: expected '=' after '+'", .{line.*, index - line_start.*});
-                                return error.SyntaxError;
-                            }
-                            index += 1;
-
-                            break :blk AstNode.AstArray.Operator.Add;
-                        },
-                        '-' => {
-                            index += 1;
-
-                            if(input[index] != '=') {
-                                std.log.err("Error at line {}, col {}: expected '=' after '+'", .{line.*, index - line_start.*});
-                                return error.SyntaxError;
-                            }
-                            index += 1;
-                            break :blk AstNode.AstArray.Operator.Sub;
-                        },
-                        '=' => {
-                            index += 1;
-                            break :blk AstNode.AstArray.Operator.Assign;
-                        },
-                        else => {
-                            std.log.err("Error at line {}, col {}: expected '=', '+=', or '-=' after array name", .{line.*, index - line_start.*});
-                            return error.SyntaxError;
-                        }
-                    };
-
-                    const array = try root.parseArray(root, input, &index, line, line_start);
-                    try nodes.append(.{ .array = .{.name = word, .operator = operator, .value = array} });
-                    skipWhitespace(input, index, line, line_start);
-
-                    if(input[index] != ';') {
-                        std.log.err("Error at line {}, col {}: expected ';' after array parameter", .{line.*, index - line_start.*});
-                        return error.SyntaxError;
-                    }
-
-                    index += 1;
-                } else {
-                    skipWhitespace(input, index, line, line_start);
-                    if(input[index] != '=') {
-                        std.log.err("Error at line {}, col {}: expected '=' or '[' after parameter name", .{line.*, index - line_start.*});
-                        return error.SyntaxError;
-                    }
-                    index += 1;
-                    skipWhitespace(input, index, line, line_start);
-
-                    const expression = false;
-                    if(input[index] == '@') {
-                        expression == true;
-                    }
-
-                    var foundQuote = undefined;
-                    const wordValue = getWord(input, &index, line, line_start, &[_]u8{';', '}', '\n', '\r'}, &foundQuote, root.allocator);
-                    if(foundQuote == undefined) {
-                        std.log.err("Error at line {}, col {}: Failed to read word. Please create an issue with your config.", .{line.*, index - line_start.*});
-                        return error.SyntaxError;
-                    }
-
-                    c = input[index];
-                    switch (c) {
-                        '}' => {
-                            index -= 1;
-                            std.log.warn("Warning at line {}, col {}: Missing ';' prior to '}'", .{line.*, index - line_start.*});
-                        },
-                        ';' => {
-                            index += 1;
-                        },
-                        else => {
-                            if (c != '\n' and c != '\r') {
-                                if(!foundQuote) {
-                                    std.log.err("Error at line {}, col {}: Expected ';' after parameter value", .{line.*, index - line_start.*});
-                                    return error.SyntaxError;
-                                } else {
-                                    index -= 1;
-                                }
-                            }
-                            std.log.warn("Warning at line {}, col {}: Missing ';' at end of line.", .{line.*, index - line_start.*});
-                        }
-                    }
-
-                    if(expression) {
-                        std.log.err("Error at line {}, col {}: Expressions are not yet implemented", .{line.*, index - line_start.*});
-                        return error.NotImplemented;
-                    } else if (!foundQuote) {
-                        if (std.mem.eql(u8, wordValue[0..6], "__EVAL")) {
-                            std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index - line_start.*});
-                            return error.NotImplemented;
-                        }
-                        const value = try createValue(
-                            scanInt(word) orelse
-                                scanInt64(word) orelse
-                                scanFloat(word) orelse
-                                word,
-                            root.allocator
-                        );
-                        errdefer Value.deinit(&value, root.allocator);
-
-                        try nodes.append(.{ .parameter = .{ .name = word, .value = value } });
-                    } else {
-                        const value = try createValue(wordValue, root.allocator);
-                        errdefer Value.deinit(&value, root.allocator);
-
-                        try nodes.append(.{ .parameter = .{ .name = word, .value = value } });
-                    }
-
-                }
-            }
-
-        }
-
-    }
-
-    pub fn parseArray(root: *Root, input: []const u8, index: *usize, line: *usize, line_start: *usize) !Array {
-        skipWhitespace(input, 0, line, line_start);
-        const array = Array.init(root.allocator);
-        if(input[index.*] != '{') {
-            std.log.err("Error at line {}, col {}: expected '{{' at start of array", .{line.*, index.* - line_start.*});
-            return error.SyntaxError;
-        }
-        index.* += 1;
-
-        while (true) {
-            skipWhitespace(input, index, line, line_start);
-
-            if (index.* >= input.len) {
-                std.log.err("Error at line {}, col {}: unexpected end of input in array", .{line.*, index.* - line_start.*});
-                return error.SyntaxError;
-            }
-
-            switch (input[index.*]) {
-                '{' => {
-                    const nested_array = try root.parseArray(root, input, index, line, line_start);
-                    try array.push(Value{ .array = nested_array });
-                },
-                '#' => {
-                    std.log.err("Error at line {}, col {}: Directives not implemented", .{line.*, index.* - line_start.*});
-                    return error.NotImplemented;
-                },
-                '@' => {
-                    var foundQuote = false;
-                    _ = try getWord(input, index, line, line_start, &[_]u8{',', ';', '}'}, &foundQuote, root.allocator);
-                    std.log.err("Error at line {}, col {}: Expressions not implemented", .{line.*, index.* - line_start.*});
-                    return error.NotImplemented;
-                },
-                '}' => {
-                    index.* += 1;
-                    return array;
-                },
-                ',' => {
-                    index.* += 1;
-                },
-                ';' => {
-                    std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{line.*, index.* - line_start.*});
-                    index.* += 1;
-                },
-                else => {
-                    var foundQuote = false;
-                    const found = try getWord(input, index, line, line_start, &[_]u8{',', ';', '}'}, &foundQuote, root.allocator);
-                    const c = input[index.*];
-                    if(c == ',' or c == ';') {
-                        if(c == ';') {
-                            std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{line.*, index.* - line_start.*});
-                        }
-
-                        if(!foundQuote) {
-
-                            if(found[0] == '@') {
-                                std.log.err("Error at line {}, col {}: Expressions not implemented", .{line.*, index.* - line_start.*});
-                                return error.NotImplemented;
-                            }
-
-                            if (std.mem.eql(u8, found[0..6], "__EVAL")) {
-                                std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index - line_start.*});
-                                return error.NotImplemented;
-                            }
-                            const value = try createValue(
-                                scanInt(found) orelse
-                                    scanFloat(found) orelse
-                                    found,
-                                root.allocator
-                            );
-
-                            errdefer Value.deinit(&value, root.allocator);
-                            try array.push(value);
-                        }
-                    }
-                },
-            }
-        }
-
-        return error.Unimplemented;
-    }
 };
-
-fn scanHex(val: []const u8) ?i32 {
-    if (val.len < 3) return null;
-
-    if (!std.ascii.eqlIgnoreCase(val[0..2], "0x")) return null;
-
-    const hex_part = val[2..];
-    if (hex_part.len == 0) return null;
-
-    for (hex_part) |c| {
-        if (!std.ascii.isHex(c)) return null;
-    }
-
-    return std.fmt.parseInt(i32, hex_part, 16) catch null;
-}
-
-fn scanInt(input: []const u8) ?i32 {
-    if (input.len == 0) return null;
-
-    if (scanIntPlain(input)) |val| {
-        return val;
-    }
-
-    if (scanHex(input)) |val| {
-        return val;
-    }
-
-    return null;
-}
-
-fn scanIntPlain(ptr: []const u8) ?i32 {
-    if (ptr.len == 0) return null;
-
-    return std.fmt.parseInt(i32, ptr, 10) catch null;
-}
-
-fn scanInt64(input: []const u8) ?i64 {
-    return std.fmt.parseInt(i32, input, 10) catch null;
-}
-
-fn scanFloatPlain(ptr: []const u8) ?f32 {
-    if (ptr.len == 0) return null;
-
-    return std.fmt.parseFloat(f32, ptr) catch null;
-}
-
-fn scanDb(ptr: []const u8) ?f32 {
-    if (ptr.len < 3 or ptr[0] != 'd' or ptr[1] != 'b') return null;
-
-    const db_part = ptr[2..];
-
-    const db_value = std.fmt.parseFloat(f32, db_part) catch {
-        std.debug.print("invalid db value {s}\n", .{ptr});
-        return null;
-    };
-
-    return std.math.pow(f32, 10.0, db_value * (1.0 / 20.0));
-}
-
-fn scanFloat(ptr: []const u8) ?f32 {
-    if (ptr.len == 0) return null;
-
-    if (scanFloatPlain(ptr)) |val| {
-        return val;
-    }
-
-    if (scanDb(ptr)) |val| {
-        return val;
-    }
-
-    return null;
-}
-fn getWord(
-    input: []const u8,
-    index: *usize,
-    line: *usize,
-    line_start: *usize,
-    terminators: []const u8,
-    found_quote: *bool,
-    allocator: Allocator
-) ![]const u8 {
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
-
-    skipWhitespace(input, index, line, line_start);
-
-    if(input[index.*] == '"') {
-        index.* += 1;
-        found_quote.* = true;
-        while (index.* < input.len) {
-            if(input[index.*] == '"') {
-                index.* += 1;
-                if(index.* < input.len and input[index.*] != '"') {
-                    skipWhitespace(input, index, line, line_start);
-
-                    if(index.* < input.len and input[index.*] != '\\') {
-                        return try result.toOwnedSlice();
-                    }
-
-                    index.* += 1;
-                    if(index.* < input.len and input[index.*] != 'n') {
-                        std.log.err("Error at line {}, col {}: invalid escape sequence", .{line.*, index.* - line_start.*});
-                        return error.SyntaxError;
-                    }
-                    skipWhitespace(input, index, line, line_start);
-
-                    if(index.* < input.len and input[index.*] != '"') {
-                        std.log.err("Error at line {}, col {}: expected '\"' after escape sequence", .{line.*, index.* - line_start.*});
-                        return error.SyntaxError;
-                    }
-
-                    index.* += 1;
-                    try result.append('\n');
-                } else {
-                    try result.append('"');
-                }
-                const c = input[index.*];
-
-                if(c == '\n' or c == '\r') {
-                    std.log.err("Error at line {}, col {}: End of line encountered", .{line.*, index.* - line_start.*});
-                    return error.SyntaxError;
-                }
-                result.append(c);
-                continue;
-            }
-        }
-        std.log.err("Error at line {}, col {}: unterminated string literal", .{line.*, index.* - line_start.*});
-        return error.SyntaxError;
-    } else {
-        found_quote.* = false;
-        var c = input[index.*];
-        while (index.* < input.len and std.mem.indexOfScalar(u8, terminators, c) == null) {
-            if( c == '\n' or c == '\r' ) {
-                while (true) {
-                    skipWhitespace(input, index, line, line_start);
-                    if(input[index.*] != '#') {
-                        break;
-                    }
-                    std.log.err("Error at line {}, col {}: Directives not implemented", .{line.*, index.* - line_start.*});
-                    return error.NotImplemented;
-                }
-                c = input[index.*];
-                if(std.mem.indexOfScalar(u8, terminators, ) == null) {
-                    std.log.err("Error at line {}, col {}: Expected unquoted terminator got '{}'", .{line.*, index.* - line_start.*, c});
-                }
-            } else {
-                index.* += 1;
-                if (index.* >= input.len) break;
-                try result.append(c);
-                c = input[index.*];
-            }
-        }
-
-        return try result.toOwnedSlice();
-    }
-}
-
-fn skipWhitespace(input: []const u8, index: *usize, line: *usize, line_start: *usize) void {
-    while (index.* < input.len ) {
-        const c = input[index.*];
-        if(c == '\n') {
-            line.* += 1;
-            index.* += 1;
-            line_start.* = index.*;
-        } else if (std.ascii.isSpace(c)) {
-            index.* += 1;
-        } else {
-            break;
-        }
-    }
-}
-
-fn getAlphaWord(input: []const u8, index: *usize, line: *usize, line_start: *usize) []const u8 {
-    skipWhitespace(input, index, line, line_start);
-
-    const word_start = index.*;
-
-    while (index.* < input.len) {
-        const c = input[index.*];
-        if (!(std.ascii.isAlphanumeric(c) or c == '_')) {
-            break;
-        }
-        index.* += 1;
-    }
-
-    return input[word_start..index.*];
-}
 
 pub const Context = struct {
     name:          []const u8,
@@ -904,6 +453,17 @@ pub const Context = struct {
         return result.toOwnedSlice();
     }
 
+
+    pub fn parse(self: *Context, input: []const u8, protect: bool) !void {
+        var index: usize = 0;
+        var line: usize = 1;
+        var line_start: usize = 0;
+
+        const nodes = try AstNode.parseContext(input, &index, &line, &line_start, self.root.allocator);
+        defer self.root.allocator.free(nodes);
+
+        try self.update(nodes, protect);
+    }
 
     pub fn retain(self: *Context) *Context {
         var old_refs = self.refs.load(.acquire);
@@ -1317,9 +877,469 @@ const AstNode = union(enum) {
         operator: AstOperator,
         value: Array,
     };
+
+    pub fn parseContext(input: []const u8, index: *usize, line: *usize, line_start: *usize, allocator: Allocator) ![]const AstNode {
+        var nodes = std.ArrayList(AstNode).init(allocator);
+
+        while (index.* < input.len) {
+            skipWhitespace(input, index, line, line_start);
+
+
+            const c = input[index.*];
+
+            if(c == '#') {
+                //todo
+            }
+
+            if(c == '}') {
+                index.* += 1;
+
+                break;
+            }
+
+            var word = getAlphaWord(input, index, line, line_start);
+            if (std.mem.eql(u8, word, "delete")) {
+                word = getAlphaWord(input, index, line, line_start);
+
+                skipWhitespace(input, index, line, line_start);
+
+                if (input[index.*] != ';') {
+                    std.log.err("Error at line {}, col {}: expected ';' after 'delete' statement.", .{line.*, index.* - line_start.*});
+                    return error.SyntaxError;
+                }
+                index.* += 1;
+
+                try nodes.append(.{ .delete = word });
+
+            } else if (std.mem.eql(u8, word, "class")) {
+                const class_name = getAlphaWord(input, index);
+
+                skipWhitespace(input, index, line, line_start);
+
+                if (input[index.*] == ';') {
+                    index.* += 1;
+
+                    try nodes.append(.{ .classs = .{ .name = class_name, .extends = null, .nodes = null } });
+                } else {
+                    var extends_name: ?[]const u8 = null;
+                    if(input[index.*] == ':') {
+                        index.* += 1;
+                        extends_name = getAlphaWord(input, index);
+                    }
+                    skipWhitespace(input, index, line, line_start);
+
+                    if(input[index.*] != '{') {
+                        if(extends_name != null) {
+                            std.log.err("Error at line {}, col {}: expected '{{' after class declaration.", .{line.*, index.* - line_start.*});
+                        } else {
+                            std.log.err("Error at line {}, col {}: expected ';' or '{{' after class declaration.", .{line.*, index.* - line_start.*});
+                        }
+                        return error.SyntaxError;
+                    }
+                    index.* += 1;
+
+                    try nodes.append(.{
+                        .classs = .{
+                            .name = class_name,
+                            .extends = extends_name,
+                            .nodes = try parseContext(input[index], index, line, line_start, allocator)
+                        }
+                    });
+                }
+            } else {
+                if (input[index.*] == '[') {
+                    index.* += 1;
+
+                    skipWhitespace(input, index, line, line_start);
+
+                    if (input[index.*] != ']') {
+                        std.log.err("Error at line {}, col {}: expected ']' or whitespace after '['", .{line.*, index.* - line_start.*});
+                        return error.SyntaxError;
+                    }
+                    index.* += 1;
+                    skipWhitespace(input, index, line, line_start);
+                    const operator: AstNode.AstArray.Operator = blk: switch (input[index.*]) {
+                        '+' => {
+                            index.* += 1;
+
+                            if(input[index.*] != '=') {
+                                std.log.err("Error at line {}, col {}: expected '=' after '+'", .{line.*, index.* - line_start.*});
+                                return error.SyntaxError;
+                            }
+                            index.* += 1;
+
+                            break :blk AstNode.AstArray.Operator.Add;
+                        },
+                        '-' => {
+                            index.* += 1;
+
+                            if(input[index.*] != '=') {
+                                std.log.err("Error at line {}, col {}: expected '=' after '+'", .{line.*, index.* - line_start.*});
+                                return error.SyntaxError;
+                            }
+                            index.* += 1;
+                            break :blk AstNode.AstArray.Operator.Sub;
+                        },
+                        '=' => {
+                            index.* += 1;
+                            break :blk AstNode.AstArray.Operator.Assign;
+                        },
+                        else => {
+                            std.log.err("Error at line {}, col {}: expected '=', '+=', or '-=' after array name", .{line.*, index.* - line_start.*});
+                            return error.SyntaxError;
+                        }
+                    };
+
+                    const array = try parseArray( input, index, line, line_start, allocator);
+                    try nodes.append(.{ .array = .{.name = word, .operator = operator, .value = array} });
+                    skipWhitespace(input, index, line, line_start);
+
+                    if(input[index.*] != ';') {
+                        std.log.err("Error at line {}, col {}: expected ';' after array parameter", .{line.*, index.* - line_start.*});
+                        return error.SyntaxError;
+                    }
+
+                    index.* += 1;
+                } else {
+                    skipWhitespace(input, index, line, line_start);
+                    if(input[index.*] != '=') {
+                        std.log.err("Error at line {}, col {}: expected '=' or '[' after parameter name", .{line.*, index.* - line_start.*});
+                        return error.SyntaxError;
+                    }
+                    index.* += 1;
+                    skipWhitespace(input, index, line, line_start);
+
+                    const expression = false;
+                    if(input[index.*] == '@') {
+                        expression == true;
+                    }
+
+                    var foundQuote = undefined;
+                    const wordValue = getWord(input, &index, line, line_start, &[_]u8{';', '}', '\n', '\r'}, &foundQuote, allocator);
+                    if(foundQuote == undefined) {
+                        std.log.err("Error at line {}, col {}: Failed to read word. Please create an issue with your config.", .{line.*, index.* - line_start.*});
+                        return error.SyntaxError;
+                    }
+
+                    c = input[index.*];
+                    switch (c) {
+                        '}' => {
+                            index.* -= 1;
+                            std.log.warn("Warning at line {}, col {}: Missing ';' prior to '}'", .{line.*, index.* - line_start.*});
+                        },
+                        ';' => {
+                            index.* += 1;
+                        },
+                        else => {
+                            if (c != '\n' and c != '\r') {
+                                if(!foundQuote) {
+                                    std.log.err("Error at line {}, col {}: Expected ';' after parameter value", .{line.*, index.* - line_start.*});
+                                    return error.SyntaxError;
+                                } else {
+                                    index -= 1;
+                                }
+                            }
+                            std.log.warn("Warning at line {}, col {}: Missing ';' at end of line.", .{line.*, index.* - line_start.*});
+                        }
+                    }
+
+                    if(expression) {
+                        std.log.err("Error at line {}, col {}: Expressions are not yet implemented", .{line.*, index.* - line_start.*});
+                        return error.NotImplemented;
+                    } else if (!foundQuote) {
+                        if (std.mem.eql(u8, wordValue[0..6], "__EVAL")) {
+                            std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index.* - line_start.*});
+                            return error.NotImplemented;
+                        }
+                        const value = try createValue(
+                            scanInt(word) orelse
+                                scanInt64(word) orelse
+                                scanFloat(word) orelse
+                                word,
+                            allocator
+                        );
+                        errdefer Value.deinit(&value, allocator);
+
+                        try nodes.append(.{ .parameter = .{ .name = word, .value = value } });
+                    } else {
+                        const value = try createValue(wordValue, allocator);
+                        errdefer Value.deinit(&value, allocator);
+
+                        try nodes.append(.{ .parameter = .{ .name = word, .value = value } });
+                    }
+
+                }
+            }
+
+        }
+
+    }
+
+    pub fn parseArray(input: []const u8, index: *usize, line: *usize, line_start: *usize, allocator: Allocator) !Array {
+        skipWhitespace(input, 0, line, line_start);
+        const array = Array.init(allocator);
+        if(input[index.*] != '{') {
+            std.log.err("Error at line {}, col {}: expected '{{' at start of array", .{line.*, index.* - line_start.*});
+            return error.SyntaxError;
+        }
+        index.* += 1;
+
+        while (true) {
+            skipWhitespace(input, index, line, line_start);
+
+            if (index.* >= input.len) {
+                std.log.err("Error at line {}, col {}: unexpected end of input in array", .{line.*, index.* - line_start.*});
+                return error.SyntaxError;
+            }
+
+            switch (input[index.*]) {
+                '{' => {
+                    const nested_array = try parseArray(input, index, line, line_start, allocator);
+                    try array.push(Value{ .array = nested_array });
+                },
+                '#' => {
+                    std.log.err("Error at line {}, col {}: Directives not implemented", .{line.*, index.* - line_start.*});
+                    return error.NotImplemented;
+                },
+                '@' => {
+                    var foundQuote = false;
+                    _ = try getWord(input, index, line, line_start, &[_]u8{',', ';', '}'}, &foundQuote, allocator);
+                    std.log.err("Error at line {}, col {}: Expressions not implemented", .{line.*, index.* - line_start.*});
+                    return error.NotImplemented;
+                },
+                '}' => {
+                    index.* += 1;
+                    return array;
+                },
+                ',' => {
+                    index.* += 1;
+                },
+                ';' => {
+                    std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{line.*, index.* - line_start.*});
+                    index.* += 1;
+                },
+                else => {
+                    var foundQuote = false;
+                    const found = try getWord(input, index, line, line_start, &[_]u8{',', ';', '}'}, &foundQuote, allocator);
+                    const c = input[index.*];
+                    if(c == ',' or c == ';') {
+                        if(c == ';') {
+                            std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{line.*, index.* - line_start.*});
+                        }
+
+                        if(!foundQuote) {
+
+                            if(found[0] == '@') {
+                                std.log.err("Error at line {}, col {}: Expressions not implemented", .{line.*, index.* - line_start.*});
+                                return error.NotImplemented;
+                            }
+
+                            if (std.mem.eql(u8, found[0..6], "__EVAL")) {
+                                std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index - line_start.*});
+                                return error.NotImplemented;
+                            }
+                            const value = try createValue(
+                                scanInt(found) orelse
+                                    scanFloat(found) orelse
+                                    found,
+                                allocator
+                            );
+
+                            errdefer Value.deinit(&value, allocator);
+                            try array.push(value);
+                        }
+                    }
+                },
+            }
+        }
+
+        return error.Unimplemented;
+    }
 };
 
-pub const AstFile = struct {
-    allocator: Allocator,
-    nodes: std.ArrayList(AstNode),
-};
+fn scanHex(val: []const u8) ?i32 {
+    if (val.len < 3) return null;
+
+    if (!std.ascii.eqlIgnoreCase(val[0..2], "0x")) return null;
+
+    const hex_part = val[2..];
+    if (hex_part.len == 0) return null;
+
+    for (hex_part) |c| {
+        if (!std.ascii.isHex(c)) return null;
+    }
+
+    return std.fmt.parseInt(i32, hex_part, 16) catch null;
+}
+
+fn scanInt(input: []const u8) ?i32 {
+    if (input.len == 0) return null;
+
+    if (scanIntPlain(input)) |val| {
+        return val;
+    }
+
+    if (scanHex(input)) |val| {
+        return val;
+    }
+
+    return null;
+}
+
+fn scanIntPlain(ptr: []const u8) ?i32 {
+    if (ptr.len == 0) return null;
+
+    return std.fmt.parseInt(i32, ptr, 10) catch null;
+}
+
+fn scanInt64(input: []const u8) ?i64 {
+    return std.fmt.parseInt(i32, input, 10) catch null;
+}
+
+fn scanFloatPlain(ptr: []const u8) ?f32 {
+    if (ptr.len == 0) return null;
+
+    return std.fmt.parseFloat(f32, ptr) catch null;
+}
+
+fn scanDb(ptr: []const u8) ?f32 {
+    if (ptr.len < 3 or ptr[0] != 'd' or ptr[1] != 'b') return null;
+
+    const db_part = ptr[2..];
+
+    const db_value = std.fmt.parseFloat(f32, db_part) catch {
+        std.debug.print("invalid db value {s}\n", .{ptr});
+        return null;
+    };
+
+    return std.math.pow(f32, 10.0, db_value * (1.0 / 20.0));
+}
+
+fn scanFloat(ptr: []const u8) ?f32 {
+    if (ptr.len == 0) return null;
+
+    if (scanFloatPlain(ptr)) |val| {
+        return val;
+    }
+
+    if (scanDb(ptr)) |val| {
+        return val;
+    }
+
+    return null;
+}
+fn getWord(
+    input: []const u8,
+    index: *usize,
+    line: *usize,
+    line_start: *usize,
+    terminators: []const u8,
+    found_quote: *bool,
+    allocator: Allocator
+) ![]const u8 {
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+
+    skipWhitespace(input, index, line, line_start);
+
+    if(input[index.*] == '"') {
+        index.* += 1;
+        found_quote.* = true;
+        while (index.* < input.len) {
+            if(input[index.*] == '"') {
+                index.* += 1;
+                if(index.* < input.len and input[index.*] != '"') {
+                    skipWhitespace(input, index, line, line_start);
+
+                    if(index.* < input.len and input[index.*] != '\\') {
+                        return try result.toOwnedSlice();
+                    }
+
+                    index.* += 1;
+                    if(index.* < input.len and input[index.*] != 'n') {
+                        std.log.err("Error at line {}, col {}: invalid escape sequence", .{line.*, index.* - line_start.*});
+                        return error.SyntaxError;
+                    }
+                    skipWhitespace(input, index, line, line_start);
+
+                    if(index.* < input.len and input[index.*] != '"') {
+                        std.log.err("Error at line {}, col {}: expected '\"' after escape sequence", .{line.*, index.* - line_start.*});
+                        return error.SyntaxError;
+                    }
+
+                    index.* += 1;
+                    try result.append('\n');
+                } else {
+                    try result.append('"');
+                }
+                const c = input[index.*];
+
+                if(c == '\n' or c == '\r') {
+                    std.log.err("Error at line {}, col {}: End of line encountered", .{line.*, index.* - line_start.*});
+                    return error.SyntaxError;
+                }
+                result.append(c);
+                continue;
+            }
+        }
+        std.log.err("Error at line {}, col {}: unterminated string literal", .{line.*, index.* - line_start.*});
+        return error.SyntaxError;
+    } else {
+        found_quote.* = false;
+        var c = input[index.*];
+        while (index.* < input.len and std.mem.indexOfScalar(u8, terminators, c) == null) {
+            if( c == '\n' or c == '\r' ) {
+                while (true) {
+                    skipWhitespace(input, index, line, line_start);
+                    if(input[index.*] != '#') {
+                        break;
+                    }
+                    std.log.err("Error at line {}, col {}: Directives not implemented", .{line.*, index.* - line_start.*});
+                    return error.NotImplemented;
+                }
+                c = input[index.*];
+                if(std.mem.indexOfScalar(u8, terminators, ) == null) {
+                    std.log.err("Error at line {}, col {}: Expected unquoted terminator got '{}'", .{line.*, index.* - line_start.*, c});
+                }
+            } else {
+                index.* += 1;
+                if (index.* >= input.len) break;
+                try result.append(c);
+                c = input[index.*];
+            }
+        }
+
+        return try result.toOwnedSlice();
+    }
+}
+
+fn skipWhitespace(input: []const u8, index: *usize, line: *usize, line_start: *usize) void {
+    while (index.* < input.len ) {
+        const c = input[index.*];
+        if(c == '\n') {
+            line.* += 1;
+            index.* += 1;
+            line_start.* = index.*;
+        } else if (std.ascii.isSpace(c)) {
+            index.* += 1;
+        } else {
+            break;
+        }
+    }
+}
+
+fn getAlphaWord(input: []const u8, index: *usize, line: *usize, line_start: *usize) []const u8 {
+    skipWhitespace(input, index, line, line_start);
+
+    const word_start = index.*;
+
+    while (index.* < input.len) {
+        const c = input[index.*];
+        if (!(std.ascii.isAlphanumeric(c) or c == '_')) {
+            break;
+        }
+        index.* += 1;
+    }
+
+    return input[word_start..index.*];
+}
