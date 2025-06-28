@@ -239,6 +239,12 @@ pub const Array = struct {
         try self.values.append(value);
     }
 
+    pub fn init(allocator: Allocator) Array {
+        return Array{
+            .values = std.ArrayList(Value).init(allocator),
+        };
+    }
+
     pub fn toSyntax(self: *Array, allocator: Allocator) ![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
@@ -476,7 +482,7 @@ pub const Root = struct {
                         }
                     };
 
-                    const array = try root.parseArray(root, input[index], line, line_start);
+                    const array = try root.parseArray(root, input, &index, line, line_start);
                     try nodes.append(.{ .array = .{.name = word, .operator = operator, .value = array} });
                     skipWhitespace(input, index, line, line_start);
 
@@ -561,11 +567,83 @@ pub const Root = struct {
 
     }
 
-    pub fn parseArray(root: *Root, input: []const u8, line: *usize, line_start: *usize) !Array {
-        _ = root;
-        _ = input;
-        _ = line;
-        _ = line_start;
+    pub fn parseArray(root: *Root, input: []const u8, index: *usize, line: *usize, line_start: *usize) !Array {
+        skipWhitespace(input, 0, line, line_start);
+        const array = Array.init(root.allocator);
+        if(input[index.*] != '{') {
+            std.log.err("Error at line {}, col {}: expected '{{' at start of array", .{line.*, index.* - line_start.*});
+            return error.SyntaxError;
+        }
+        index.* += 1;
+
+        while (true) {
+            skipWhitespace(input, index, line, line_start);
+
+            if (index.* >= input.len) {
+                std.log.err("Error at line {}, col {}: unexpected end of input in array", .{line.*, index.* - line_start.*});
+                return error.SyntaxError;
+            }
+
+            switch (input[index.*]) {
+                '{' => {
+                    const nested_array = try root.parseArray(root, input, index, line, line_start);
+                    try array.push(Value{ .array = nested_array });
+                },
+                '#' => {
+                    std.log.err("Error at line {}, col {}: Directives not implemented", .{line.*, index.* - line_start.*});
+                    return error.NotImplemented;
+                },
+                '@' => {
+                    var foundQuote = false;
+                    _ = try getWord(input, index, line, line_start, &[_]u8{',', ';', '}'}, &foundQuote, root.allocator);
+                    std.log.err("Error at line {}, col {}: Expressions not implemented", .{line.*, index.* - line_start.*});
+                    return error.NotImplemented;
+                },
+                '}' => {
+                    index.* += 1;
+                    return array;
+                },
+                ',' => {
+                    index.* += 1;
+                },
+                ';' => {
+                    std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{line.*, index.* - line_start.*});
+                    index.* += 1;
+                },
+                else => {
+                    var foundQuote = false;
+                    const found = try getWord(input, index, line, line_start, &[_]u8{',', ';', '}'}, &foundQuote, root.allocator);
+                    const c = input[index.*];
+                    if(c == ',' or c == ';') {
+                        if(c == ';') {
+                            std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{line.*, index.* - line_start.*});
+                        }
+
+                        if(!foundQuote) {
+
+                            if(found[0] == '@') {
+                                std.log.err("Error at line {}, col {}: Expressions not implemented", .{line.*, index.* - line_start.*});
+                                return error.NotImplemented;
+                            }
+
+                            if (std.mem.eql(u8, found[0..6], "__EVAL")) {
+                                std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index - line_start.*});
+                                return error.NotImplemented;
+                            }
+                            const value = try createValue(
+                                scanInt(found) orelse
+                                    scanFloat(found) orelse
+                                    found,
+                                root.allocator
+                            );
+
+                            errdefer Value.deinit(&value, root.allocator);
+                            try array.push(value);
+                        }
+                    }
+                },
+            }
+        }
 
         return error.Unimplemented;
     }
@@ -583,7 +661,6 @@ fn scanHex(val: []const u8) ?i32 {
         if (!std.ascii.isHex(c)) return null;
     }
 
-    // Use std.fmt.parseInt for hex parsing
     return std.fmt.parseInt(i32, hex_part, 16) catch null;
 }
 
@@ -710,6 +787,7 @@ fn getWord(
                         break;
                     }
                     std.log.err("Error at line {}, col {}: Directives not implemented", .{line.*, index.* - line_start.*});
+                    return error.NotImplemented;
                 }
                 c = input[index.*];
                 if(std.mem.indexOfScalar(u8, terminators, ) == null) {
