@@ -363,9 +363,99 @@ pub const Root = struct {
         self.context.release();
     }
 
+    pub fn parseContext(root: *Root, input: []const u8) ![]const AstNode {
+        var index: usize = 0;
+        var nodes = std.ArrayList(AstNode).init(root.allocator);
 
+        while (index < input.len) {
+            while (index.* < input.len and std.ascii.isSpace(input[index.*])) {
+                index.* += 1;
+            }
+
+            const c = input[index];
+
+
+            if(c == '#') {
+                //todo
+            }
+
+            if(c == '}') {
+                index += 1;
+                break;
+            }
+
+            var word = getAlphaWord(input, &index);
+            if (std.mem.eql(u8, word, "delete")) {
+                word = getAlphaWord(input, &index);
+
+                while (index.* < input.len and std.ascii.isSpace(input[index.*])) {
+                    index.* += 1;
+                }
+                if (input[index] != ';') {
+                    return error.SyntaxError;
+                }
+
+                try nodes.append(.{ .delete = word });
+
+            } else if (std.mem.eql(u8, word, "class")) {
+                const class_name = getAlphaWord(input, &index);
+
+                while (index.* < input.len and std.ascii.isSpace(input[index.*])) {
+                    index.* += 1;
+                }
+
+                if (input[index] == ';') {
+                    index += 1;
+                    try nodes.append(.{ .classs = .{ .name = class_name, .extends = null, .nodes = null } });
+                } else {
+                    var extends_name: ?[]const u8 = null;
+                    if(input[index] == ':') {
+                        index += 1;
+                        extends_name = getAlphaWord(input, &index);
+
+                    }
+                    while (index.* < input.len and std.ascii.isSpace(input[index.*])) {
+                        index.* += 1;
+                    }
+                    if(input[index] != '{') {
+                        return error.SyntaxError;
+                    }
+
+                    try nodes.append(.{
+                        .classs = .{
+                            .name = class_name,
+                            .extends = extends_name,
+                            .nodes = try root.parseContext(input[index + 1..])
+                        }
+                    });
+                }
+            } else {
+
+            }
+
+        }
+
+    }
 
 };
+
+fn getAlphaWord(input: []const u8, index: *usize) []const u8 {
+    while (index.* < input.len and std.ascii.isSpace(input[index.*])) {
+        index.* += 1;
+    }
+
+    const word_start = index.*;
+
+    while (index.* < input.len) {
+        const c = input[index.*];
+        if (!(std.ascii.isAlphanumeric(c) or c == '_')) {
+            break;
+        }
+        index.* += 1;
+    }
+
+    return input[word_start..index.*];
+}
 
 pub const Context = struct {
     name:          []const u8,
