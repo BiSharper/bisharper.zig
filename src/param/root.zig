@@ -363,6 +363,8 @@ pub const Root = struct {
         self.context.release();
     }
 
+
+
 };
 
 pub const Context = struct {
@@ -432,6 +434,7 @@ pub const Context = struct {
 
         return result.toOwnedSlice();
     }
+
 
     pub fn retain(self: *Context) *Context {
         var old_refs = self.refs.load(.acquire);
@@ -600,9 +603,30 @@ pub const Context = struct {
         return null;
     }
 
+    pub fn clear(self: *Context,) void {
+        self.rw_lock.lock();
+        defer self.rw_lock.unlock();
+
+        var child_iter = self.children.keyIterator();
+        while (child_iter.next()) |child_ptr| {
+            _ = self.removeClass(child_ptr.*);
+        }
+
+        var param_iter = self.params.keyIterator();
+        while (param_iter.next()) |param_ptr| {
+            _ = self.removeParameter(param_ptr.*);
+        }
+
+        self.access = if(self.parent) |p| p.access else .Default;
+    }
+
     pub fn removeClass(self: *Context, name: []const u8) bool {
         self.rw_lock.lock();
         defer self.rw_lock.unlock();
+
+        if(self.derivatives.load(.acquire) > 0) {
+            self.clear();
+        }
 
         if (self.children.fetchRemove(name)) |removed_entry| {
             removed_entry.value.flags.pending_delete = true;
@@ -610,6 +634,13 @@ pub const Context = struct {
             return true;
         }
         return false;
+    }
+
+    pub fn getOrCreateClass(self: *Context, name: []const u8, extends: ?*Context) !*Context {
+        if (self.children.get(name)) |child_ctx| {
+            return child_ctx.retain();
+        }
+        return self.createClass(name, extends);
     }
 
     pub fn createClass(self: *Context, name: []const u8, extends: ?*Context) !*Context {
@@ -652,6 +683,76 @@ pub const Context = struct {
         gop.value_ptr.* = child_ctx;
 
         return child_ctx.retain();
+    }
+
+    const Entry = union(enum) {
+        parameter: *Parameter,
+        context:   *Context,
+    };
+
+    fn findEntry(self: *Context, name: []const u8, parent: bool, base: bool, ) ?Entry {
+        if(self.children.get(name)) |child| {
+            return .{ .context = child };
+        }
+
+        if(self.params.get(name)) |param| {
+            return .{ .parameter = param };
+        }
+
+        if (base) {
+            if (self.base) |base_ctx| {
+                if (base_ctx.findEntry(name, false, base)) |entry| {
+                    return entry;
+                }
+            }
+        }
+
+        if(parent) {
+            if (self.parent) |parent_ctx| {
+                if (parent_ctx.findEntry(name, true, base)) |entry| {
+                    return entry;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    fn update(self: Context, nodes: []AstNode, protect: bool) !void {
+        const access = if (!protect) .ReadWrite else self.access;
+        if(access >= .ReadOnly) {
+            return error.AccessDenied;
+        }
+        self.rw_lock.lock();
+        defer self.rw_lock.unlock();
+
+        for(nodes) |node| {
+            switch (node) {
+                .delete => |del_name| {
+                    _ = self.removeClass(del_name) or {};
+                },
+                .classs => |class_node| {
+                    const child_ctx = self.getOrCreateClass(class_node.name, null);
+                    defer child_ctx.release();
+
+                    if (class_node.extends) |extends_name| {
+                        child_ctx.extend(
+                            self.children.get(extends_name) orelse return error.BaseClassNotFound
+                        );
+                    }
+
+                    try child_ctx.update(class_node.nodes orelse &[_]AstNode{}, protect) catch |err| {
+                        return err;
+                    };
+                },
+                .param => |param_node| {
+                    try self.addParameter(param_node.name, param_node.value) catch |err| {
+                        return err;
+                    };
+                },
+            }
+        }
+
     }
 
     fn checkBaseCleanup(self: *Context) void {
@@ -717,4 +818,39 @@ pub const Context = struct {
         }
 
     }
+};
+
+const AstNode = union(enum) {
+    classs: AstClass,
+    param:  AstParam,
+    delete: []const u8,
+    array:  AstArray,
+
+    pub const AstClass = struct {
+        name: []const u8,
+        extends: ?*[] const u8,
+        nodes: ?std.ArrayList(AstNode),
+    };
+
+    pub const AstParam = struct {
+        name: []const u8,
+        value: Value,
+    };
+
+    pub const AstOperator = enum {
+        Add,
+        Sub,
+        Assign,
+    };
+
+    pub const AstArray = struct {
+        name: []const u8,
+        operator: AstOperator,
+        values: []const Value,
+    };
+};
+
+pub const AstFile = struct {
+    allocator: Allocator,
+    nodes: std.ArrayList(AstNode),
 };
