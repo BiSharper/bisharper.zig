@@ -495,28 +495,70 @@ pub const Root = struct {
                     index += 1;
                     skipWhitespace(input, index, line, line_start);
 
+                    const expression = false;
                     if(input[index] == '@') {
-                        std.log.err("Error at line {}, col {}: Expressions are not yet implemented", .{line.*, index - line_start.*});
-                        return error.NotImplemented;
+                        expression == true;
                     }
 
                     var foundQuote = undefined;
-                    _ = getWord(input, &index, line, line_start, &[_]u8{';', '}', '\n', '\r'}, &foundQuote, root.allocator);
+                    const wordValue = getWord(input, &index, line, line_start, &[_]u8{';', '}', '\n', '\r'}, &foundQuote, root.allocator);
+                    if(foundQuote == undefined) {
+                        std.log.err("Error at line {}, col {}: Failed to read word. Please create an issue with your config.", .{line.*, index - line_start.*});
+                        return error.SyntaxError;
+                    }
+
+                    c = input[index];
+                    switch (c) {
+                        '}' => {
+                            index -= 1;
+                            std.log.warn("Warning at line {}, col {}: Missing ';' prior to '}'", .{line.*, index - line_start.*});
+                        },
+                        ';' => {
+                            index += 1;
+                        },
+                        else => {
+                            if (c != '\n' and c != '\r') {
+                                if(!foundQuote) {
+                                    std.log.err("Error at line {}, col {}: Expected ';' after parameter value", .{line.*, index - line_start.*});
+                                    return error.SyntaxError;
+                                } else {
+                                    index -= 1;
+                                }
+                            }
+                            std.log.warn("Warning at line {}, col {}: Missing ';' at end of line.", .{line.*, index - line_start.*});
+                        }
+                    }
+
+                    if(expression) {
+                        std.log.err("Error at line {}, col {}: Expressions are not yet implemented", .{line.*, index - line_start.*});
+                        return error.NotImplemented;
+                    } else if (!foundQuote) {
+                        if (std.mem.eql(u8, wordValue[0..6], "__EVAL")) {
+                            std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index - line_start.*});
+                            return error.NotImplemented;
+                        }
+                        const value = try createValue(
+                            scanInt(word) orelse
+                                scanInt64(word) orelse
+                                scanFloat(word) orelse
+                                word,
+                            root.allocator
+                        );
+                        errdefer Value.deinit(&value, root.allocator);
+
+                        try nodes.append(.{ .parameter = .{ .name = word, .value = value } });
+                    } else {
+                        const value = try createValue(wordValue, root.allocator);
+                        errdefer Value.deinit(&value, root.allocator);
+
+                        try nodes.append(.{ .parameter = .{ .name = word, .value = value } });
+                    }
 
                 }
             }
 
         }
 
-    }
-
-    pub fn parseValue(root: *Root, input: []const u8, line: *usize, line_start: *usize) !Value {
-        _ = root;
-        _ = input;
-        _ = line;
-        _ = line_start;
-
-        return error.Unimplemented;
     }
 
     pub fn parseArray(root: *Root, input: []const u8, line: *usize, line_start: *usize) !Array {
@@ -529,6 +571,78 @@ pub const Root = struct {
     }
 };
 
+fn scanHex(val: []const u8) ?i32 {
+    if (val.len < 3) return null;
+
+    if (!std.ascii.eqlIgnoreCase(val[0..2], "0x")) return null;
+
+    const hex_part = val[2..];
+    if (hex_part.len == 0) return null;
+
+    for (hex_part) |c| {
+        if (!std.ascii.isHex(c)) return null;
+    }
+
+    // Use std.fmt.parseInt for hex parsing
+    return std.fmt.parseInt(i32, hex_part, 16) catch null;
+}
+
+fn scanInt(input: []const u8) ?i32 {
+    if (input.len == 0) return null;
+
+    if (scanIntPlain(input)) |val| {
+        return val;
+    }
+
+    if (scanHex(input)) |val| {
+        return val;
+    }
+
+    return null;
+}
+
+fn scanIntPlain(ptr: []const u8) ?i32 {
+    if (ptr.len == 0) return null;
+
+    return std.fmt.parseInt(i32, ptr, 10) catch null;
+}
+
+fn scanInt64(input: []const u8) ?i64 {
+    return std.fmt.parseInt(i32, input, 10) catch null;
+}
+
+fn scanFloatPlain(ptr: []const u8) ?f32 {
+    if (ptr.len == 0) return null;
+
+    return std.fmt.parseFloat(f32, ptr) catch null;
+}
+
+fn scanDb(ptr: []const u8) ?f32 {
+    if (ptr.len < 3 or ptr[0] != 'd' or ptr[1] != 'b') return null;
+
+    const db_part = ptr[2..];
+
+    const db_value = std.fmt.parseFloat(f32, db_part) catch {
+        std.debug.print("invalid db value {s}\n", .{ptr});
+        return null;
+    };
+
+    return std.math.pow(f32, 10.0, db_value * (1.0 / 20.0));
+}
+
+fn scanFloat(ptr: []const u8) ?f32 {
+    if (ptr.len == 0) return null;
+
+    if (scanFloatPlain(ptr)) |val| {
+        return val;
+    }
+
+    if (scanDb(ptr)) |val| {
+        return val;
+    }
+
+    return null;
+}
 fn getWord(
     input: []const u8,
     index: *usize,
