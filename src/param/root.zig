@@ -53,6 +53,11 @@ pub fn parse(name: []const u8, content: []const u8, allocator: Allocator) !*Root
 
 pub fn createValue(value: anytype, alloc: Allocator) !Value {
     const T = @TypeOf(value);
+
+    if (T == Value) {
+        return value;
+    }
+
     const type_info = @typeInfo(T);
     switch (type_info) {
         .int => |int_info| {
@@ -149,14 +154,13 @@ pub fn createValue(value: anytype, alloc: Allocator) !Value {
 
 pub const Access = enum(i8) {
     Default = -1,
-    ReadWrite,
-    ReadCreate,
-    ReadOnly,
-    ReadOnlyVerified,
+    ReadWrite = 0,
+    ReadCreate = 1,
+    ReadOnly = 2,
+    ReadOnlyVerified = 3,
 
     pub fn toSyntax(self: Access, allocator: Allocator) ![]const u8 {
-        try std.fmt.allocPrint(allocator, "access = {d};", .{@intFromEnum(self)});
-    }
+        return try std.fmt.allocPrint(allocator, "access = {d};", .{@intFromEnum(self)});    }
 };
 
 pub const AtomicUsize = std.atomic.Value(usize);
@@ -203,7 +207,7 @@ pub const Value = union(enum) {
         };
     }
 
-    pub fn toSyntax(self: *Value, allocator: Allocator) ![]u8 {
+    pub fn toSyntax(self: *const Value, allocator: Allocator) ![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
 
@@ -258,7 +262,14 @@ pub const Array = struct {
         };
     }
 
-    pub fn toSyntax(self: *Array, allocator: Allocator) ![]u8 {
+    fn clear(self: *Array, allocator: Allocator) void {
+        for (self.values.items) |*item| {
+            item.deinit(allocator);
+        }
+        self.values.clearAndFree();
+    }
+
+    pub fn toSyntax(self: *const Array, allocator: Allocator) ![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
 
@@ -268,7 +279,7 @@ pub const Array = struct {
             if (index > 0) {
                 try result.append(',');
             }
-            const next_slice = item.toSyntax(allocator);
+            const next_slice = try item.toSyntax(allocator);
             try result.appendSlice(next_slice);
             allocator.free(next_slice);
         }
@@ -291,7 +302,7 @@ pub const Parameter = struct {
         try result.appendSlice(self.name);
 
         if(self.value == .array) {
-            try result.append("[]");
+            try result.appendSlice("[]");
         }
 
         try result.appendSlice(" = ");
@@ -381,8 +392,6 @@ pub const Root = struct {
     pub fn release(self: *Root) void {
         self.context.release();
     }
-
-
 };
 
 pub const Context = struct {
@@ -400,14 +409,11 @@ pub const Context = struct {
     derivatives:   AtomicUsize,
     rw_lock:       std.Thread.RwLock = .{},
 
-    pub fn toSyntax(self: *Context, allocator: Allocator, indent: usize) ![]u8 {
+    pub fn toSyntax(self: *Context, allocator: Allocator) ![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
 
-        const indent_str = try std.fmt.allocPrint(allocator, "{s}", .{std.mem.repeat(u8, ' ', indent)});
-        defer allocator.free(indent_str);
 
-        try result.appendSlice(indent_str);
         try result.appendSlice("class ");
         try result.appendSlice(self.name);
 
@@ -430,16 +436,13 @@ pub const Context = struct {
             while (param_it.next()) |param_ptr| {
                 const param_syntax = try param_ptr.*.toSyntax(allocator);
                 defer allocator.free(param_syntax);
-
-                try result.appendSlice(indent_str);
-                try result.appendSlice("    ");
                 try result.appendSlice(param_syntax);
                 try result.appendSlice("\n");
             }
 
             var child_it = self.children.valueIterator();
             while (child_it.next()) |child_ptr| {
-                const child_syntax = try child_ptr.*.toSyntax(allocator, indent + 4);
+                const child_syntax = try child_ptr.*.toSyntax(allocator);
                 defer allocator.free(child_syntax);
 
                 try result.appendSlice(child_syntax);
@@ -447,7 +450,6 @@ pub const Context = struct {
             }
         }
 
-        try result.appendSlice(indent_str);
         try result.appendSlice("};");
 
         return result.toOwnedSlice();
@@ -747,9 +749,9 @@ pub const Context = struct {
         return null;
     }
 
-    fn update(self: Context, nodes: []AstNode, protect: bool) !void {
-        const access = if (!protect) .ReadWrite else self.access;
-        if(access >= .ReadOnly) {
+    fn update(self: *Context, nodes: []const AstNode, protect: bool) !void {
+        const access: Access = if (!protect) .ReadWrite else self.access;
+        if(@intFromEnum(access) >= @intFromEnum(Access.ReadOnly)) {
             return error.AccessDenied;
         }
         self.rw_lock.lock();
@@ -758,10 +760,10 @@ pub const Context = struct {
         for(nodes) |node| {
             switch (node) {
                 .delete => |del_name| {
-                    _ = self.removeClass(del_name) or {};
+                    _ = self.removeClass(del_name);
                 },
                 .classs => |class_node| {
-                    const child_ctx = self.getOrCreateClass(class_node.name, null);
+                    const child_ctx = try self.getOrCreateClass(class_node.name, null);
                     defer child_ctx.release();
 
                     if (class_node.extends) |extends_name| {
@@ -770,14 +772,28 @@ pub const Context = struct {
                         );
                     }
 
-                    try child_ctx.update(class_node.nodes orelse &[_]AstNode{}, protect) catch |err| {
-                        return err;
-                    };
+                    try child_ctx.update(class_node.nodes orelse &[_]AstNode{}, protect);
                 },
                 .param => |param_node| {
-                    try self.addParameter(param_node.name, param_node.value) catch |err| {
-                        return err;
-                    };
+                    try self.addParameter(param_node.name, param_node.value);
+                },
+                .array => |array_node| {
+                    switch (array_node.operator) {
+                        .Add, .Sub => {
+                            return error.NotImplemented;
+                        },
+                        .Assign => {
+                            const gop = try self.params.getOrPut(array_node.name);
+                            const ptr = gop.value_ptr.*;
+                            if (gop.found_existing) {
+                                if (ptr.value != .array) {
+                                    return error.TypeMismatch;
+                                }
+                                ptr.value.array.clear(self.root.allocator);
+                            }
+                            try ptr.value.array.values.appendSlice(array_node.value.values.items);
+                        },
+                    }
                 },
             }
         }
@@ -857,8 +873,8 @@ const AstNode = union(enum) {
 
     pub const AstClass = struct {
         name: []const u8,
-        extends: ?*[] const u8,
-        nodes: ?std.ArrayList(AstNode),
+        extends: ?[] const u8,
+        nodes: ?[]const AstNode
     };
 
     pub const AstParam = struct {
@@ -880,23 +896,25 @@ const AstNode = union(enum) {
 
     pub fn parseContext(input: []const u8, index: *usize, line: *usize, line_start: *usize, allocator: Allocator) ![]const AstNode {
         var nodes = std.ArrayList(AstNode).init(allocator);
-
         while (index.* < input.len) {
             skipWhitespace(input, index, line, line_start);
 
 
-            const c = input[index.*];
-
+            var c = input[index.*];
             if(c == '#') {
                 //todo
             }
 
             if(c == '}') {
                 index.* += 1;
+                if (input[index.*] != ';') {
+                    std.log.err("Error at line {}, col {}: expected ';' after class ending.", .{line.*, index.* - line_start.*});
+                    return error.SyntaxError;
+                }
+                index.* += 1;
 
                 break;
             }
-
             var word = getAlphaWord(input, index, line, line_start);
             if (std.mem.eql(u8, word, "delete")) {
                 word = getAlphaWord(input, index, line, line_start);
@@ -908,11 +926,10 @@ const AstNode = union(enum) {
                     return error.SyntaxError;
                 }
                 index.* += 1;
-
                 try nodes.append(.{ .delete = word });
 
             } else if (std.mem.eql(u8, word, "class")) {
-                const class_name = getAlphaWord(input, index);
+                const class_name = getAlphaWord(input, index, line, line_start);
 
                 skipWhitespace(input, index, line, line_start);
 
@@ -924,7 +941,7 @@ const AstNode = union(enum) {
                     var extends_name: ?[]const u8 = null;
                     if(input[index.*] == ':') {
                         index.* += 1;
-                        extends_name = getAlphaWord(input, index);
+                        extends_name = getAlphaWord(input, index, line, line_start);
                     }
                     skipWhitespace(input, index, line, line_start);
 
@@ -942,7 +959,7 @@ const AstNode = union(enum) {
                         .classs = .{
                             .name = class_name,
                             .extends = extends_name,
-                            .nodes = try parseContext(input[index], index, line, line_start, allocator)
+                            .nodes = try parseContext(input, index, line, line_start, allocator)
                         }
                     });
                 }
@@ -957,8 +974,10 @@ const AstNode = union(enum) {
                         return error.SyntaxError;
                     }
                     index.* += 1;
+
                     skipWhitespace(input, index, line, line_start);
-                    const operator: AstNode.AstArray.Operator = blk: switch (input[index.*]) {
+
+                    const operator: AstNode.AstOperator = blk: switch (input[index.*]) {
                         '+' => {
                             index.* += 1;
 
@@ -967,8 +986,7 @@ const AstNode = union(enum) {
                                 return error.SyntaxError;
                             }
                             index.* += 1;
-
-                            break :blk AstNode.AstArray.Operator.Add;
+                            break :blk AstNode.AstOperator.Add;
                         },
                         '-' => {
                             index.* += 1;
@@ -978,19 +996,19 @@ const AstNode = union(enum) {
                                 return error.SyntaxError;
                             }
                             index.* += 1;
-                            break :blk AstNode.AstArray.Operator.Sub;
+                            break :blk AstNode.AstOperator.Sub;
                         },
                         '=' => {
                             index.* += 1;
-                            break :blk AstNode.AstArray.Operator.Assign;
+                            break :blk AstNode.AstOperator.Assign;
                         },
                         else => {
                             std.log.err("Error at line {}, col {}: expected '=', '+=', or '-=' after array name", .{line.*, index.* - line_start.*});
                             return error.SyntaxError;
                         }
                     };
-
                     const array = try parseArray( input, index, line, line_start, allocator);
+
                     try nodes.append(.{ .array = .{.name = word, .operator = operator, .value = array} });
                     skipWhitespace(input, index, line, line_start);
 
@@ -1001,31 +1019,29 @@ const AstNode = union(enum) {
 
                     index.* += 1;
                 } else {
+
                     skipWhitespace(input, index, line, line_start);
                     if(input[index.*] != '=') {
                         std.log.err("Error at line {}, col {}: expected '=' or '[' after parameter name", .{line.*, index.* - line_start.*});
                         return error.SyntaxError;
                     }
                     index.* += 1;
+
                     skipWhitespace(input, index, line, line_start);
 
-                    const expression = false;
+                    var expression = false;
                     if(input[index.*] == '@') {
-                        expression == true;
+                        expression = true;
                     }
 
-                    var foundQuote = undefined;
-                    const wordValue = getWord(input, &index, line, line_start, &[_]u8{';', '}', '\n', '\r'}, &foundQuote, allocator);
-                    if(foundQuote == undefined) {
-                        std.log.err("Error at line {}, col {}: Failed to read word. Please create an issue with your config.", .{line.*, index.* - line_start.*});
-                        return error.SyntaxError;
-                    }
+                    var foundQuote: bool = false;
+                    const wordValue = try getWord(input, index, line, line_start, &[_]u8{';', '}', '\n', '\r'}, &foundQuote, allocator);
 
                     c = input[index.*];
                     switch (c) {
                         '}' => {
                             index.* -= 1;
-                            std.log.warn("Warning at line {}, col {}: Missing ';' prior to '}'", .{line.*, index.* - line_start.*});
+                            std.log.warn("Warning at line {}, col {}: Missing ';' prior to '}}'", .{line.*, index.* - line_start.*});
                         },
                         ';' => {
                             index.* += 1;
@@ -1036,7 +1052,7 @@ const AstNode = union(enum) {
                                     std.log.err("Error at line {}, col {}: Expected ';' after parameter value", .{line.*, index.* - line_start.*});
                                     return error.SyntaxError;
                                 } else {
-                                    index -= 1;
+                                    index.* -= 1;
                                 }
                             }
                             std.log.warn("Warning at line {}, col {}: Missing ';' at end of line.", .{line.*, index.* - line_start.*});
@@ -1047,25 +1063,22 @@ const AstNode = union(enum) {
                         std.log.err("Error at line {}, col {}: Expressions are not yet implemented", .{line.*, index.* - line_start.*});
                         return error.NotImplemented;
                     } else if (!foundQuote) {
-                        if (std.mem.eql(u8, wordValue[0..6], "__EVAL")) {
+                        if (wordValue.len > 7 and std.mem.eql(u8, wordValue[0..6], "__EVAL")) {
                             std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index.* - line_start.*});
                             return error.NotImplemented;
                         }
-                        const value = try createValue(
-                            scanInt(word) orelse
-                                scanInt64(word) orelse
-                                scanFloat(word) orelse
-                                word,
-                            allocator
-                        );
+                        var value = try scanInt(wordValue, allocator) orelse
+                            try scanInt64(wordValue, allocator) orelse
+                            try scanFloat(wordValue, allocator) orelse
+                            try createValue(wordValue, allocator);
                         errdefer Value.deinit(&value, allocator);
 
-                        try nodes.append(.{ .parameter = .{ .name = word, .value = value } });
+                        try nodes.append(.{ .param = .{ .name = word, .value = value } });
                     } else {
-                        const value = try createValue(wordValue, allocator);
+                        var value = try createValue(wordValue, allocator);
                         errdefer Value.deinit(&value, allocator);
 
-                        try nodes.append(.{ .parameter = .{ .name = word, .value = value } });
+                        try nodes.append(.{ .param = .{ .name = word, .value = value } });
                     }
 
                 }
@@ -1073,13 +1086,13 @@ const AstNode = union(enum) {
 
         }
 
+        return try nodes.toOwnedSlice();
     }
 
     pub fn parseArray(input: []const u8, index: *usize, line: *usize, line_start: *usize, allocator: Allocator) !Array {
-        skipWhitespace(input, 0, line, line_start);
-        const array = Array.init(allocator);
+        skipWhitespace(input, index, line, line_start);
+        var array = Array.init(allocator);
         if(input[index.*] != '{') {
-            std.log.err("Error at line {}, col {}: expected '{{' at start of array", .{line.*, index.* - line_start.*});
             return error.SyntaxError;
         }
         index.* += 1;
@@ -1088,11 +1101,11 @@ const AstNode = union(enum) {
             skipWhitespace(input, index, line, line_start);
 
             if (index.* >= input.len) {
-                std.log.err("Error at line {}, col {}: unexpected end of input in array", .{line.*, index.* - line_start.*});
                 return error.SyntaxError;
             }
+            var current_char = input[index.*];
 
-            switch (input[index.*]) {
+            switch (current_char) {
                 '{' => {
                     const nested_array = try parseArray(input, index, line, line_start, allocator);
                     try array.push(Value{ .array = nested_array });
@@ -1121,9 +1134,11 @@ const AstNode = union(enum) {
                 else => {
                     var foundQuote = false;
                     const found = try getWord(input, index, line, line_start, &[_]u8{',', ';', '}'}, &foundQuote, allocator);
-                    const c = input[index.*];
-                    if(c == ',' or c == ';') {
-                        if(c == ';') {
+
+                    current_char = input[index.*];
+
+                    if(current_char == ',' or current_char == ';') {
+                        if(current_char == ';') {
                             std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{line.*, index.* - line_start.*});
                         }
 
@@ -1135,16 +1150,16 @@ const AstNode = union(enum) {
                             }
 
                             if (std.mem.eql(u8, found[0..6], "__EVAL")) {
-                                std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index - line_start.*});
+                                std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index.* - line_start.*});
                                 return error.NotImplemented;
                             }
-                            const value = try createValue(
-                                scanInt(found) orelse
-                                    scanFloat(found) orelse
-                                    found,
-                                allocator
-                            );
-
+                            var value = try scanInt(found, allocator) orelse
+                                try scanFloat(found, allocator) orelse
+                                try createValue(found, allocator);
+                            errdefer Value.deinit(&value, allocator);
+                            try array.push(value);
+                        } else {
+                            var value = try createValue(found, allocator);
                             errdefer Value.deinit(&value, allocator);
                             try array.push(value);
                         }
@@ -1172,15 +1187,15 @@ fn scanHex(val: []const u8) ?i32 {
     return std.fmt.parseInt(i32, hex_part, 16) catch null;
 }
 
-fn scanInt(input: []const u8) ?i32 {
+fn scanInt(input: []const u8, allocator: Allocator) !?Value {
     if (input.len == 0) return null;
 
     if (scanIntPlain(input)) |val| {
-        return val;
+        return try createValue(val, allocator);
     }
 
     if (scanHex(input)) |val| {
-        return val;
+        return try createValue(val, allocator);
     }
 
     return null;
@@ -1192,8 +1207,25 @@ fn scanIntPlain(ptr: []const u8) ?i32 {
     return std.fmt.parseInt(i32, ptr, 10) catch null;
 }
 
-fn scanInt64(input: []const u8) ?i64 {
-    return std.fmt.parseInt(i32, input, 10) catch null;
+fn scanInt64Plain(ptr: []const u8) ?i64 {
+    if (ptr.len == 0) return null;
+
+    return std.fmt.parseInt(i64, ptr, 10) catch null;
+}
+
+fn scanInt64(input: []const u8, allocator: Allocator) !?Value {
+
+    if (input.len == 0) return null;
+
+    if (scanInt64Plain(input)) |val| {
+        return try createValue(val, allocator);
+    }
+
+    if (scanHex(input)) |val| {
+        return try createValue(val, allocator);
+    }
+
+    return null;
 }
 
 fn scanFloatPlain(ptr: []const u8) ?f32 {
@@ -1215,19 +1247,20 @@ fn scanDb(ptr: []const u8) ?f32 {
     return std.math.pow(f32, 10.0, db_value * (1.0 / 20.0));
 }
 
-fn scanFloat(ptr: []const u8) ?f32 {
+fn scanFloat(ptr: []const u8, allocator: Allocator) !?Value {
     if (ptr.len == 0) return null;
 
     if (scanFloatPlain(ptr)) |val| {
-        return val;
+        return try createValue(val, allocator);
     }
 
     if (scanDb(ptr)) |val| {
-        return val;
+        return try createValue(val, allocator);
     }
 
     return null;
 }
+
 fn getWord(
     input: []const u8,
     index: *usize,
@@ -1246,7 +1279,8 @@ fn getWord(
         index.* += 1;
         found_quote.* = true;
         while (index.* < input.len) {
-            if(input[index.*] == '"') {
+            const c = input[index.*];
+            if(c == '"') {
                 index.* += 1;
                 if(index.* < input.len and input[index.*] != '"') {
                     skipWhitespace(input, index, line, line_start);
@@ -1254,7 +1288,6 @@ fn getWord(
                     if(index.* < input.len and input[index.*] != '\\') {
                         return try result.toOwnedSlice();
                     }
-
                     index.* += 1;
                     if(index.* < input.len and input[index.*] != 'n') {
                         std.log.err("Error at line {}, col {}: invalid escape sequence", .{line.*, index.* - line_start.*});
@@ -1270,15 +1303,16 @@ fn getWord(
                     index.* += 1;
                     try result.append('\n');
                 } else {
+                    index.* += 1;
                     try result.append('"');
                 }
-                const c = input[index.*];
-
+            } else {
                 if(c == '\n' or c == '\r') {
                     std.log.err("Error at line {}, col {}: End of line encountered", .{line.*, index.* - line_start.*});
                     return error.SyntaxError;
                 }
-                result.append(c);
+                try result.append(c);
+                index.* += 1;
                 continue;
             }
         }
@@ -1298,7 +1332,7 @@ fn getWord(
                     return error.NotImplemented;
                 }
                 c = input[index.*];
-                if(std.mem.indexOfScalar(u8, terminators, ) == null) {
+                if(std.mem.indexOfScalar(u8, terminators, c) == null) {
                     std.log.err("Error at line {}, col {}: Expected unquoted terminator got '{}'", .{line.*, index.* - line_start.*, c});
                 }
             } else {
@@ -1320,7 +1354,7 @@ fn skipWhitespace(input: []const u8, index: *usize, line: *usize, line_start: *u
             line.* += 1;
             index.* += 1;
             line_start.* = index.*;
-        } else if (std.ascii.isSpace(c)) {
+        } else if (std.ascii.isWhitespace(c)) {
             index.* += 1;
         } else {
             break;

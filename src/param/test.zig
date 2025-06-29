@@ -8,6 +8,36 @@ const expectEqualStrings = testing.expectEqualStrings;
 
 const param = @import("root.zig");
 
+//write tests to parse param file and make sure it parses without errors
+test "parse param file" {
+    const allocator = std.testing.allocator;
+
+    const param_path = std.fs.path.join(allocator, &.{ ".", "tests", "param", "config.cpp"}) catch unreachable;
+    defer allocator.free(param_path);
+
+    const file = try std.fs.cwd().openFile(param_path, .{});
+    defer file.close();
+    
+    const size = try file.getEndPos();
+
+    const buffer = try allocator.alloc(u8, @intCast(size));
+    defer allocator.free(buffer);
+
+    _ = try file.readAll(buffer);
+
+    const parsed = try param.parse("config", buffer, allocator);
+
+    const context = parsed.retain();
+    defer context.release();
+
+    std.debug.print("Parsed context name: {s}\n", .{context.name});
+    //
+    // const syntax = try context.toSyntax(allocator);
+    // defer allocator.free(syntax);
+    //
+    // std.debug.print("{s}\n", .{syntax});
+
+}
 
 test "Context.getParameter" {
     const allocator = std.testing.allocator;
