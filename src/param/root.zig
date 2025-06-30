@@ -57,12 +57,7 @@ pub fn parse(name: []const u8, content: []const u8, protect: bool, allocator: Al
     const root = try database(name, allocator);
     errdefer root.release();
 
-    const context: *Context = root.retain();
-    defer context.release();
-    context.flags.loaded = false;
-    defer context.flags.loaded = true;
-
-    try context.parse(content, protect);
+    try root.parse(content, protect);
 
     return root;
 }
@@ -79,6 +74,16 @@ pub const Root = struct {
 
     pub fn release(self: *Root) void {
         self.context.release();
+    }
+
+    pub fn parse(self: *Root, content: []const u8, protect: bool) !void {
+        const context: *Context = self.retain();
+        defer context.release();
+
+        context.flags.loaded = false;
+        defer context.flags.loaded = true;
+
+        try context.parse(content, protect);
     }
 };
 
