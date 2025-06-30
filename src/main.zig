@@ -18,7 +18,7 @@ pub fn main() !void {
 
     _ = try file.readAll(buffer);
 
-    const parsed = try param.parse("config", buffer, allocator);
+    const parsed = try param.parse("config", buffer, false, allocator);
 
     const context = parsed.retain();
     defer context.release();

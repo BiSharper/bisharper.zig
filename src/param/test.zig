@@ -8,16 +8,15 @@ const expectEqualStrings = testing.expectEqualStrings;
 
 const param = @import("root.zig");
 
-//write tests to parse param file and make sure it parses without errors
 test "parse param file" {
     const allocator = std.testing.allocator;
 
-    const param_path = std.fs.path.join(allocator, &.{ ".", "tests", "param", "config.cpp"}) catch unreachable;
+    const param_path = std.fs.path.join(allocator, &.{ ".", "tests", "param", "config.cpp" }) catch unreachable;
     defer allocator.free(param_path);
 
     const file = try std.fs.cwd().openFile(param_path, .{});
     defer file.close();
-    
+
     const size = try file.getEndPos();
 
     const buffer = try allocator.alloc(u8, @intCast(size));
@@ -25,18 +24,16 @@ test "parse param file" {
 
     _ = try file.readAll(buffer);
 
-    const parsed = try param.parse("config", buffer, allocator);
+    const parsed = try param.parse("config", buffer, false, allocator);
+    defer parsed.release();
 
     const context = parsed.retain();
     defer context.release();
-
-    std.debug.print("Parsed context name: {s}\n", .{context.name});
     //
     // const syntax = try context.toSyntax(allocator);
     // defer allocator.free(syntax);
     //
     // std.debug.print("{s}\n", .{syntax});
-
 }
 
 test "Context.getParameter" {
@@ -90,7 +87,6 @@ test "Context.getParameter" {
         const not_found = ctx.getValue(i32, "non_existent_param");
         try std.testing.expect(not_found == null);
     }
-
 }
 test "simple retain/release stress" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -98,6 +94,8 @@ test "simple retain/release stress" {
     const allocator = arena.allocator();
 
     const root = try param.database("test_db", allocator);
+    defer root.release();
+
     const ctx = root.retain();
 
     const num_workers = 3;
@@ -343,7 +341,7 @@ test "parameter operations - arrays" {
     defer ctx.release();
 
     // Add array parameter
-    const test_array = [_]i32{1, 2, 3, 4, 5};
+    const test_array = [_]i32{ 1, 2, 3, 4, 5 };
     try ctx.addParameter("array_param", test_array);
 
     // Get parameter
@@ -499,7 +497,7 @@ test "supported string types" {
     try ctx.addParameter("slice_param", string_slice);
 
     // Method 2: Array converted to slice
-    const string_array = [_]u8{'a', 'r', 'r', 'a', 'y'};
+    const string_array = [_]u8{ 'a', 'r', 'r', 'a', 'y' };
     try ctx.addParameter("array_param", string_array);
 
     // Verify the parameters
@@ -522,7 +520,7 @@ test "parameter path generation with nested arrays" {
     defer ctx.release();
 
     // Create nested array parameter
-    const test_array = [_]i32{1, 2, 3};
+    const test_array = [_]i32{ 1, 2, 3 };
     try ctx.addParameter("nested_array", test_array);
 
     const par = ctx.getParameter("nested_array").?;
@@ -568,7 +566,7 @@ test "memory cleanup and reference counting" {
 
     const test_string: []const u8 = "value1";
     try ctx1.addParameter("param1", test_string);
-    try ctx1.addParameter("param2", [_]i32{1, 2, 3, 4, 5});
+    try ctx1.addParameter("param2", [_]i32{ 1, 2, 3, 4, 5 });
 
     const child = try ctx1.createClass("child", null);
     try child.addParameter("child_param", 42);
