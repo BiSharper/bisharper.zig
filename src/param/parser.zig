@@ -49,6 +49,11 @@ pub const AstNode = union(enum) {
 
     pub fn parseContext(input: []const u8, index: *usize, line: *usize, line_start: *usize, allocator: Allocator) ![]AstNode {
         var nodes = std.ArrayList(AstNode).init(allocator);
+        errdefer {
+            for (nodes.items) |*node| node.deinit(allocator);
+            nodes.deinit();
+        }
+
         while (index.* < input.len) {
             skipWhitespace(input, index, line, line_start);
 
@@ -235,6 +240,10 @@ pub const AstNode = union(enum) {
     pub fn parseArray(input: []const u8, index: *usize, line: *usize, line_start: *usize, allocator: Allocator) !param.Array {
         skipWhitespace(input, index, line, line_start);
         var array = param.Array.init(allocator);
+        errdefer {
+            for (array.values.items) |*val| val.deinit(allocator);
+            array.deinit(allocator);
+        }
         if (input[index.*] != '{') {
             return error.SyntaxError;
         }
