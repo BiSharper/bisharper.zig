@@ -422,6 +422,9 @@ pub const Context = struct {
         for (nodes) |node| {
             switch (node) {
                 .delete => |del_name| {
+                    if(@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
+                        return error.AccessDenied;
+                    }
                     _ = self.removeClassUnlocked(del_name);
                 },
                 .class => |class_node| {
@@ -446,8 +449,29 @@ pub const Context = struct {
                     try self.addParameterUnlocked(param_node.name, value_clone);
                 },
                 .array => |array_node| {
+                    if(@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
+                        return error.AccessDenied;
+                    }
+
                     switch (array_node.operator) {
-                        .Add, .Sub => {
+                        .Add => {
+                            const found: ?*param.Parameter = self.params.get(array_node.name);
+                            if (found) |par| {
+                                if (par.value != .array) {
+                                    return error.TypeMismatch;
+                                }
+
+                                for (array_node.value.values.items) |*item| {
+                                    const cloned_item: param.Value = try item.clone(alloc);
+                                    try par.value.array.values.append(cloned_item);
+                                }
+                            } else {
+                                var value_clone = try param.createValue(try array_node.value.clone(alloc), alloc);
+                                errdefer value_clone.deinit(alloc);
+                                try self.addParameterUnlocked(array_node.name, value_clone);
+                            }
+                        },
+                        .Sub => {
                             return error.NotImplemented;
                         },
                         .Assign => {

@@ -8,27 +8,46 @@ const expectEqualStrings = testing.expectEqualStrings;
 
 const param = @import("root.zig");
 
-test "parse param file" {
-    const allocator = std.testing.allocator;
-
-    const param_path = std.fs.path.join(allocator, &.{ ".", "tests", "param", "config.cpp" }) catch unreachable;
-    defer allocator.free(param_path);
-
-    const file = try std.fs.cwd().openFile(param_path, .{});
+pub fn readFileContents(allocator: std.mem.Allocator, file_path: []const u8) ![]u8 {
+    const file = try std.fs.cwd().openFile(file_path, .{});
     defer file.close();
 
     const size = try file.getEndPos();
-
     const buffer = try allocator.alloc(u8, @intCast(size));
-    defer allocator.free(buffer);
-
     _ = try file.readAll(buffer);
 
-    const parsed = try param.parse("config", buffer, false, allocator);
+    return buffer;
+}
+
+pub fn readFileFromParts(allocator: std.mem.Allocator, path_parts: []const []const u8) ![]u8 {
+    const file_path = try std.fs.path.join(allocator, path_parts);
+    defer allocator.free(file_path);
+
+    return readFileContents(allocator, file_path);
+}
+
+test "parse param file" {
+    const allocator = std.testing.allocator;
+
+    const mainBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "config.cpp" });
+    defer allocator.free(mainBuffer);
+
+    const parsed = try param.parse("config", mainBuffer, false, allocator);
     defer parsed.release();
+
+    const addMissionScriptBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "addMissionScript.cpp" });
+    defer allocator.free(addMissionScriptBuffer);
+
+    try parsed.parse(addMissionScriptBuffer, true);
 
     const context = parsed.retain();
     defer context.release();
+
+    const syntax = try context.toSyntax(allocator);
+    defer allocator.free(syntax);
+
+    std.debug.print("{s}", .{syntax});
+
 }
 
 test "Context.getParameter" {
