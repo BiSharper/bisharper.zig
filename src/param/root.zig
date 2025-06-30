@@ -38,16 +38,15 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
     return file;
 }
 
-
 pub fn parse(name: []const u8, content: []const u8, allocator: Allocator) !*Root {
     const root = try database(name, allocator);
     errdefer root.release();
 
     const context: *Context = root.retain();
     defer context.release();
-    
+
     try context.parse(content, false);
-    
+
     return root;
 }
 
@@ -160,15 +159,16 @@ pub const Access = enum(i8) {
     ReadOnlyVerified = 3,
 
     pub fn toSyntax(self: Access, allocator: Allocator) ![]const u8 {
-        return try std.fmt.allocPrint(allocator, "access = {d};", .{@intFromEnum(self)});    }
+        return try std.fmt.allocPrint(allocator, "access = {d};", .{@intFromEnum(self)});
+    }
 };
 
 pub const AtomicUsize = std.atomic.Value(usize);
 
 pub const ContextFlags = packed struct {
     pending_cleanup: bool = false,
-    pending_delete:  bool = true,
-    loaded:          bool = true,
+    pending_delete: bool = true,
+    loaded: bool = true,
 
     pub fn none() ContextFlags {
         return ContextFlags{};
@@ -176,11 +176,11 @@ pub const ContextFlags = packed struct {
 };
 
 pub const Value = union(enum) {
-    i32:    i32,
-    i64:    i64,
-    f32:    f32,
+    i32: i32,
+    i64: i64,
+    f32: f32,
     string: []u8,
-    array:  Array,
+    array: Array,
 
     fn deinit(self: *Value, alloc: Allocator) void {
         switch (self.*) {
@@ -291,9 +291,9 @@ pub const Array = struct {
 };
 
 pub const Parameter = struct {
-    parent:      *Context,
-    name:        []const u8,
-    value:       Value,
+    parent: *Context,
+    name: []const u8,
+    value: Value,
 
     pub fn toSyntax(self: *Parameter, allocator: Allocator) ![]u8 {
         var result = std.ArrayList(u8).init(allocator);
@@ -301,7 +301,7 @@ pub const Parameter = struct {
 
         try result.appendSlice(self.name);
 
-        if(self.value == .array) {
+        if (self.value == .array) {
             try result.appendSlice("[]");
         }
 
@@ -332,17 +332,17 @@ pub const Parameter = struct {
 
         var pos: usize = 0;
 
-        @memcpy(result[pos..pos + parent_path.len], parent_path);
+        @memcpy(result[pos .. pos + parent_path.len], parent_path);
         pos += parent_path.len;
 
         result[pos] = '.';
         pos += 1;
 
-        @memcpy(result[pos..pos + self.name.len], self.name);
+        @memcpy(result[pos .. pos + self.name.len], self.name);
         pos += self.name.len;
 
         if (value_suffix) |suffix| {
-            @memcpy(result[pos..pos + suffix.len], suffix);
+            @memcpy(result[pos .. pos + suffix.len], suffix);
         }
 
         return result;
@@ -370,7 +370,7 @@ pub const Parameter = struct {
         }
 
         return null;
-}
+    }
 
     pub fn deinit(self: *Parameter) void {
         const allocator = self.parent.root.allocator;
@@ -382,8 +382,8 @@ pub const Parameter = struct {
 
 pub const Root = struct {
     allocator: Allocator,
-    name:      []u8,
-    context:   *Context,
+    name: []u8,
+    context: *Context,
 
     pub fn retain(self: *Root) *Context {
         return self.context.retain();
@@ -395,24 +395,23 @@ pub const Root = struct {
 };
 
 pub const Context = struct {
-    name:          []const u8,
-    access:        Access = .Default,
-    children:      std.StringHashMap(*Context),
-    params:        std.StringHashMap(*Parameter),
-    root:          *Root,
-    parent:        ?*Context,
-    base:          ?*Context,
-    flags:         ContextFlags,
+    name: []const u8,
+    access: Access = .Default,
+    children: std.StringHashMap(*Context),
+    params: std.StringHashMap(*Parameter),
+    root: *Root,
+    parent: ?*Context,
+    base: ?*Context,
+    flags: ContextFlags,
 
-    parent_refs:   []volatile *AtomicUsize,
-    refs:          AtomicUsize,
-    derivatives:   AtomicUsize,
-    rw_lock:       std.Thread.RwLock = .{},
+    parent_refs: []volatile *AtomicUsize,
+    refs: AtomicUsize,
+    derivatives: AtomicUsize,
+    rw_lock: std.Thread.RwLock = .{},
 
     pub fn toSyntax(self: *Context, allocator: Allocator) ![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
-
 
         try result.appendSlice("class ");
         try result.appendSlice(self.name);
@@ -455,7 +454,6 @@ pub const Context = struct {
         return result.toOwnedSlice();
     }
 
-
     pub fn parse(self: *Context, input: []const u8, protect: bool) !void {
         var index: usize = 0;
         var line: usize = 1;
@@ -474,12 +472,12 @@ pub const Context = struct {
                 @panic("attempt to retain object with a zero reference count");
             }
 
-            if(self.refs.cmpxchgWeak(
+            if (self.refs.cmpxchgWeak(
                 old_refs,
                 old_refs + 1,
                 .acq_rel,
                 .acquire,
-            )) | actual_val | {
+            )) |actual_val| {
                 old_refs = actual_val;
             } else break;
         }
@@ -513,7 +511,7 @@ pub const Context = struct {
         var pos: usize = 0;
 
         for (path_components.items, 0..) |component, i| {
-            @memcpy(result[pos..pos + component.len], component);
+            @memcpy(result[pos .. pos + component.len], component);
             pos += component.len;
             if (i < path_components.items.len - 1) {
                 result[pos] = '.';
@@ -527,10 +525,13 @@ pub const Context = struct {
     pub fn addParameter(self: *Context, name: []const u8, value: anytype) !void {
         self.rw_lock.lock();
         defer self.rw_lock.unlock();
+        return self.addParameterUnlocked(name, value);
+    }
 
+    fn addParameterUnlocked(self: *Context, name: []const u8, value: anytype) !void {
         const alloc = self.root.allocator;
 
-        if(std.mem.eql(u8, name, "access")) {
+        if (std.mem.eql(u8, name, "access")) {
             return error.ReservedParameterName;
         }
 
@@ -546,7 +547,7 @@ pub const Context = struct {
         errdefer alloc.destroy(param);
 
         const owned_value = try createValue(value, alloc);
-        errdefer Parameter.deinitValue(&owned_value, alloc);
+        errdefer Value.deinit(&owned_value, alloc);
 
         param.* = .{
             .parent = self,
@@ -560,7 +561,10 @@ pub const Context = struct {
     pub fn removeParameter(self: *Context, name: []const u8) bool {
         self.rw_lock.lock();
         defer self.rw_lock.unlock();
+        return self.removeParameterUnlocked(name);
+    }
 
+    fn removeParameterUnlocked(self: *Context, name: []const u8) bool {
         if (self.params.fetchRemove(name)) |removed_entry| {
             const param = removed_entry.value;
             param.deinit();
@@ -606,25 +610,26 @@ pub const Context = struct {
 
             return self.deinit();
         }
-
     }
 
     pub fn extend(self: *Context, new_extends: ?*Context) void {
         self.rw_lock.lock();
         defer self.rw_lock.unlock();
+        self.extendUnlocked(new_extends);
+    }
 
+    fn extendUnlocked(self: *Context, new_extends: ?*Context) void {
         if (self.base) |old_base| {
             _ = old_base.derivatives.rmw(.Sub, 1, .acq_rel);
             old_base.checkBaseCleanup();
         }
 
-        if(new_extends) |new| {
+        if (new_extends) |new| {
             _ = new.derivatives.rmw(.Add, 1, .acq_rel);
             self.base = new;
-        } else{
+        } else {
             self.base = null;
         }
-
     }
 
     pub fn retainClass(self: *Context, name: []const u8) ?*Context {
@@ -634,29 +639,39 @@ pub const Context = struct {
         return null;
     }
 
-    pub fn clear(self: *Context,) void {
+    pub fn clear(
+        self: *Context,
+    ) void {
         self.rw_lock.lock();
         defer self.rw_lock.unlock();
+        self.clearUnlocked();
+    }
 
+    fn clearUnlocked(
+        self: *Context,
+    ) void {
         var child_iter = self.children.keyIterator();
         while (child_iter.next()) |child_ptr| {
-            _ = self.removeClass(child_ptr.*);
+            _ = self.removeClassUnlocked(child_ptr.*);
         }
 
         var param_iter = self.params.keyIterator();
         while (param_iter.next()) |param_ptr| {
-            _ = self.removeParameter(param_ptr.*);
+            _ = self.removeParameterUnlocked(param_ptr.*);
         }
 
-        self.access = if(self.parent) |p| p.access else .Default;
+        self.access = if (self.parent) |p| p.access else .Default;
     }
 
     pub fn removeClass(self: *Context, name: []const u8) bool {
         self.rw_lock.lock();
         defer self.rw_lock.unlock();
+        return self.removeClassUnlocked(name);
+    }
 
-        if(self.derivatives.load(.acquire) > 0) {
-            self.clear();
+    fn removeClassUnlocked(self: *Context, name: []const u8) bool {
+        if (self.derivatives.load(.acquire) > 0) {
+            self.clearUnlocked();
         }
 
         if (self.children.fetchRemove(name)) |removed_entry| {
@@ -677,7 +692,10 @@ pub const Context = struct {
     pub fn createClass(self: *Context, name: []const u8, extends: ?*Context) !*Context {
         self.rw_lock.lock();
         defer self.rw_lock.unlock();
+        return self.createClassUnlocked(name, extends);
+    }
 
+    fn createClassUnlocked(self: *Context, name: []const u8, extends: ?*Context) !*Context {
         const alloc = self.root.allocator;
 
         const child_ctx = try alloc.create(Context);
@@ -709,7 +727,7 @@ pub const Context = struct {
         };
 
         child_ctx.parent_refs[0] = &child_ctx.refs;
-        child_ctx.extend(extends);
+        child_ctx.extendUnlocked(extends);
 
         gop.value_ptr.* = child_ctx;
 
@@ -718,15 +736,20 @@ pub const Context = struct {
 
     const Entry = union(enum) {
         parameter: *Parameter,
-        context:   *Context,
+        context: *Context,
     };
 
-    fn findEntry(self: *Context, name: []const u8, parent: bool, base: bool, ) ?Entry {
-        if(self.children.get(name)) |child| {
+    fn findEntry(
+        self: *Context,
+        name: []const u8,
+        parent: bool,
+        base: bool,
+    ) ?Entry {
+        if (self.children.get(name)) |child| {
             return .{ .context = child };
         }
 
-        if(self.params.get(name)) |param| {
+        if (self.params.get(name)) |param| {
             return .{ .parameter = param };
         }
 
@@ -738,7 +761,7 @@ pub const Context = struct {
             }
         }
 
-        if(parent) {
+        if (parent) {
             if (self.parent) |parent_ctx| {
                 if (parent_ctx.findEntry(name, true, base)) |entry| {
                     return entry;
@@ -751,31 +774,35 @@ pub const Context = struct {
 
     fn update(self: *Context, nodes: []const AstNode, protect: bool) !void {
         const access: Access = if (!protect) .ReadWrite else self.access;
-        if(@intFromEnum(access) >= @intFromEnum(Access.ReadOnly)) {
+        if (@intFromEnum(access) >= @intFromEnum(Access.ReadOnly)) {
             return error.AccessDenied;
         }
         self.rw_lock.lock();
         defer self.rw_lock.unlock();
 
-        for(nodes) |node| {
+        for (nodes) |node| {
             switch (node) {
                 .delete => |del_name| {
-                    _ = self.removeClass(del_name);
+                    _ = self.removeClassUnlocked(del_name);
                 },
                 .classs => |class_node| {
-                    const child_ctx = try self.getOrCreateClass(class_node.name, null);
-                    defer child_ctx.release();
+                    var child_ctx: *Context = undefined;
+                    if (self.children.get(class_node.name)) |existing| {
+                        child_ctx = existing.retain();
+                    } else {
+                        child_ctx = try self.createClassUnlocked(class_node.name, null);
+                    }
 
                     if (class_node.extends) |extends_name| {
-                        child_ctx.extend(
-                            self.children.get(extends_name) orelse return error.BaseClassNotFound
-                        );
+                        child_ctx.extendUnlocked(self.children.get(extends_name) orelse return error.BaseClassNotFound);
                     }
 
                     try child_ctx.update(class_node.nodes orelse &[_]AstNode{}, protect);
+
+                    child_ctx.release();
                 },
                 .param => |param_node| {
-                    try self.addParameter(param_node.name, param_node.value);
+                    try self.addParameterUnlocked(param_node.name, param_node.value);
                 },
                 .array => |array_node| {
                     switch (array_node.operator) {
@@ -784,20 +811,30 @@ pub const Context = struct {
                         },
                         .Assign => {
                             const gop = try self.params.getOrPut(array_node.name);
+                            const alloc = self.root.allocator;
                             const ptr = gop.value_ptr.*;
                             if (gop.found_existing) {
                                 if (ptr.value != .array) {
                                     return error.TypeMismatch;
                                 }
-                                ptr.value.array.clear(self.root.allocator);
+                                ptr.value.array.clear(alloc);
+                            } else {
+                                const param = try alloc.create(Parameter);
+                                errdefer alloc.destroy(param);
+                                const owned_name = gop.key_ptr.*;
+                                param.* = .{
+                                    .parent = self,
+                                    .name = owned_name,
+                                    .value = Value{ .array = Array.init(alloc) },
+                                };
+                                gop.value_ptr.* = param;
                             }
-                            try ptr.value.array.values.appendSlice(array_node.value.values.items);
+                            try gop.value_ptr.*.value.array.values.appendSlice(array_node.value.values.items);
                         },
                     }
                 },
             }
         }
-
     }
 
     fn checkBaseCleanup(self: *Context) void {
@@ -861,21 +898,16 @@ pub const Context = struct {
             allocator.destroy(self.root.context);
             allocator.destroy(root_ptr);
         }
-
     }
 };
 
 const AstNode = union(enum) {
     classs: AstClass,
-    param:  AstParam,
+    param: AstParam,
     delete: []const u8,
-    array:  AstArray,
+    array: AstArray,
 
-    pub const AstClass = struct {
-        name: []const u8,
-        extends: ?[] const u8,
-        nodes: ?[]const AstNode
-    };
+    pub const AstClass = struct { name: []const u8, extends: ?[]const u8, nodes: ?[]const AstNode };
 
     pub const AstParam = struct {
         name: []const u8,
@@ -899,16 +931,15 @@ const AstNode = union(enum) {
         while (index.* < input.len) {
             skipWhitespace(input, index, line, line_start);
 
-
             var c = input[index.*];
-            if(c == '#') {
+            if (c == '#') {
                 //todo
             }
 
-            if(c == '}') {
+            if (c == '}') {
                 index.* += 1;
                 if (input[index.*] != ';') {
-                    std.log.err("Error at line {}, col {}: expected ';' after class ending.", .{line.*, index.* - line_start.*});
+                    std.log.err("Error at line {}, col {}: expected ';' after class ending.", .{ line.*, index.* - line_start.* });
                     return error.SyntaxError;
                 }
                 index.* += 1;
@@ -922,12 +953,11 @@ const AstNode = union(enum) {
                 skipWhitespace(input, index, line, line_start);
 
                 if (input[index.*] != ';') {
-                    std.log.err("Error at line {}, col {}: expected ';' after 'delete' statement.", .{line.*, index.* - line_start.*});
+                    std.log.err("Error at line {}, col {}: expected ';' after 'delete' statement.", .{ line.*, index.* - line_start.* });
                     return error.SyntaxError;
                 }
                 index.* += 1;
                 try nodes.append(.{ .delete = word });
-
             } else if (std.mem.eql(u8, word, "class")) {
                 const class_name = getAlphaWord(input, index, line, line_start);
 
@@ -939,29 +969,23 @@ const AstNode = union(enum) {
                     try nodes.append(.{ .classs = .{ .name = class_name, .extends = null, .nodes = null } });
                 } else {
                     var extends_name: ?[]const u8 = null;
-                    if(input[index.*] == ':') {
+                    if (input[index.*] == ':') {
                         index.* += 1;
                         extends_name = getAlphaWord(input, index, line, line_start);
                     }
                     skipWhitespace(input, index, line, line_start);
 
-                    if(input[index.*] != '{') {
-                        if(extends_name != null) {
-                            std.log.err("Error at line {}, col {}: expected '{{' after class declaration.", .{line.*, index.* - line_start.*});
+                    if (input[index.*] != '{') {
+                        if (extends_name != null) {
+                            std.log.err("Error at line {}, col {}: expected '{{' after class declaration.", .{ line.*, index.* - line_start.* });
                         } else {
-                            std.log.err("Error at line {}, col {}: expected ';' or '{{' after class declaration.", .{line.*, index.* - line_start.*});
+                            std.log.err("Error at line {}, col {}: expected ';' or '{{' after class declaration.", .{ line.*, index.* - line_start.* });
                         }
                         return error.SyntaxError;
                     }
                     index.* += 1;
 
-                    try nodes.append(.{
-                        .classs = .{
-                            .name = class_name,
-                            .extends = extends_name,
-                            .nodes = try parseContext(input, index, line, line_start, allocator)
-                        }
-                    });
+                    try nodes.append(.{ .classs = .{ .name = class_name, .extends = extends_name, .nodes = try parseContext(input, index, line, line_start, allocator) } });
                 }
             } else {
                 if (input[index.*] == '[') {
@@ -970,7 +994,7 @@ const AstNode = union(enum) {
                     skipWhitespace(input, index, line, line_start);
 
                     if (input[index.*] != ']') {
-                        std.log.err("Error at line {}, col {}: expected ']' or whitespace after '['", .{line.*, index.* - line_start.*});
+                        std.log.err("Error at line {}, col {}: expected ']' or whitespace after '['", .{ line.*, index.* - line_start.* });
                         return error.SyntaxError;
                     }
                     index.* += 1;
@@ -981,8 +1005,8 @@ const AstNode = union(enum) {
                         '+' => {
                             index.* += 1;
 
-                            if(input[index.*] != '=') {
-                                std.log.err("Error at line {}, col {}: expected '=' after '+'", .{line.*, index.* - line_start.*});
+                            if (input[index.*] != '=') {
+                                std.log.err("Error at line {}, col {}: expected '=' after '+'", .{ line.*, index.* - line_start.* });
                                 return error.SyntaxError;
                             }
                             index.* += 1;
@@ -991,8 +1015,8 @@ const AstNode = union(enum) {
                         '-' => {
                             index.* += 1;
 
-                            if(input[index.*] != '=') {
-                                std.log.err("Error at line {}, col {}: expected '=' after '+'", .{line.*, index.* - line_start.*});
+                            if (input[index.*] != '=') {
+                                std.log.err("Error at line {}, col {}: expected '=' after '+'", .{ line.*, index.* - line_start.* });
                                 return error.SyntaxError;
                             }
                             index.* += 1;
@@ -1003,26 +1027,25 @@ const AstNode = union(enum) {
                             break :blk AstNode.AstOperator.Assign;
                         },
                         else => {
-                            std.log.err("Error at line {}, col {}: expected '=', '+=', or '-=' after array name", .{line.*, index.* - line_start.*});
+                            std.log.err("Error at line {}, col {}: expected '=', '+=', or '-=' after array name", .{ line.*, index.* - line_start.* });
                             return error.SyntaxError;
-                        }
+                        },
                     };
-                    const array = try parseArray( input, index, line, line_start, allocator);
+                    const array = try parseArray(input, index, line, line_start, allocator);
 
-                    try nodes.append(.{ .array = .{.name = word, .operator = operator, .value = array} });
+                    try nodes.append(.{ .array = .{ .name = word, .operator = operator, .value = array } });
                     skipWhitespace(input, index, line, line_start);
 
-                    if(input[index.*] != ';') {
-                        std.log.err("Error at line {}, col {}: expected ';' after array parameter", .{line.*, index.* - line_start.*});
+                    if (input[index.*] != ';') {
+                        std.log.err("Error at line {}, col {}: expected ';' after array parameter", .{ line.*, index.* - line_start.* });
                         return error.SyntaxError;
                     }
 
                     index.* += 1;
                 } else {
-
                     skipWhitespace(input, index, line, line_start);
-                    if(input[index.*] != '=') {
-                        std.log.err("Error at line {}, col {}: expected '=' or '[' after parameter name", .{line.*, index.* - line_start.*});
+                    if (input[index.*] != '=') {
+                        std.log.err("Error at line {}, col {}: expected '=' or '[' after parameter name", .{ line.*, index.* - line_start.* });
                         return error.SyntaxError;
                     }
                     index.* += 1;
@@ -1030,41 +1053,41 @@ const AstNode = union(enum) {
                     skipWhitespace(input, index, line, line_start);
 
                     var expression = false;
-                    if(input[index.*] == '@') {
+                    if (input[index.*] == '@') {
                         expression = true;
                     }
 
                     var foundQuote: bool = false;
-                    const wordValue = try getWord(input, index, line, line_start, &[_]u8{';', '}', '\n', '\r'}, &foundQuote, allocator);
+                    const wordValue = try getWord(input, index, line, line_start, &[_]u8{ ';', '}', '\n', '\r' }, &foundQuote, allocator);
 
                     c = input[index.*];
                     switch (c) {
                         '}' => {
                             index.* -= 1;
-                            std.log.warn("Warning at line {}, col {}: Missing ';' prior to '}}'", .{line.*, index.* - line_start.*});
+                            std.log.warn("Warning at line {}, col {}: Missing ';' prior to '}}'", .{ line.*, index.* - line_start.* });
                         },
                         ';' => {
                             index.* += 1;
                         },
                         else => {
                             if (c != '\n' and c != '\r') {
-                                if(!foundQuote) {
-                                    std.log.err("Error at line {}, col {}: Expected ';' after parameter value", .{line.*, index.* - line_start.*});
+                                if (!foundQuote) {
+                                    std.log.err("Error at line {}, col {}: Expected ';' after parameter value", .{ line.*, index.* - line_start.* });
                                     return error.SyntaxError;
                                 } else {
                                     index.* -= 1;
                                 }
                             }
-                            std.log.warn("Warning at line {}, col {}: Missing ';' at end of line.", .{line.*, index.* - line_start.*});
-                        }
+                            std.log.warn("Warning at line {}, col {}: Missing ';' at end of line.", .{ line.*, index.* - line_start.* });
+                        },
                     }
 
-                    if(expression) {
-                        std.log.err("Error at line {}, col {}: Expressions are not yet implemented", .{line.*, index.* - line_start.*});
+                    if (expression) {
+                        std.log.err("Error at line {}, col {}: Expressions are not yet implemented", .{ line.*, index.* - line_start.* });
                         return error.NotImplemented;
                     } else if (!foundQuote) {
                         if (wordValue.len > 7 and std.mem.eql(u8, wordValue[0..6], "__EVAL")) {
-                            std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index.* - line_start.*});
+                            std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{ line.*, index.* - line_start.* });
                             return error.NotImplemented;
                         }
                         var value = try scanInt(wordValue, allocator) orelse
@@ -1080,10 +1103,8 @@ const AstNode = union(enum) {
 
                         try nodes.append(.{ .param = .{ .name = word, .value = value } });
                     }
-
                 }
             }
-
         }
 
         return try nodes.toOwnedSlice();
@@ -1092,7 +1113,7 @@ const AstNode = union(enum) {
     pub fn parseArray(input: []const u8, index: *usize, line: *usize, line_start: *usize, allocator: Allocator) !Array {
         skipWhitespace(input, index, line, line_start);
         var array = Array.init(allocator);
-        if(input[index.*] != '{') {
+        if (input[index.*] != '{') {
             return error.SyntaxError;
         }
         index.* += 1;
@@ -1111,13 +1132,13 @@ const AstNode = union(enum) {
                     try array.push(Value{ .array = nested_array });
                 },
                 '#' => {
-                    std.log.err("Error at line {}, col {}: Directives not implemented", .{line.*, index.* - line_start.*});
+                    std.log.err("Error at line {}, col {}: Directives not implemented", .{ line.*, index.* - line_start.* });
                     return error.NotImplemented;
                 },
                 '@' => {
                     var foundQuote = false;
-                    _ = try getWord(input, index, line, line_start, &[_]u8{',', ';', '}'}, &foundQuote, allocator);
-                    std.log.err("Error at line {}, col {}: Expressions not implemented", .{line.*, index.* - line_start.*});
+                    _ = try getWord(input, index, line, line_start, &[_]u8{ ',', ';', '}' }, &foundQuote, allocator);
+                    std.log.err("Error at line {}, col {}: Expressions not implemented", .{ line.*, index.* - line_start.* });
                     return error.NotImplemented;
                 },
                 '}' => {
@@ -1128,29 +1149,28 @@ const AstNode = union(enum) {
                     index.* += 1;
                 },
                 ';' => {
-                    std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{line.*, index.* - line_start.*});
+                    std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{ line.*, index.* - line_start.* });
                     index.* += 1;
                 },
                 else => {
                     var foundQuote = false;
-                    const found = try getWord(input, index, line, line_start, &[_]u8{',', ';', '}'}, &foundQuote, allocator);
+                    const found = try getWord(input, index, line, line_start, &[_]u8{ ',', ';', '}' }, &foundQuote, allocator);
 
                     current_char = input[index.*];
 
-                    if(current_char == ',' or current_char == ';') {
-                        if(current_char == ';') {
-                            std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{line.*, index.* - line_start.*});
+                    if (current_char == ',' or current_char == ';') {
+                        if (current_char == ';') {
+                            std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{ line.*, index.* - line_start.* });
                         }
 
-                        if(!foundQuote) {
-
-                            if(found[0] == '@') {
-                                std.log.err("Error at line {}, col {}: Expressions not implemented", .{line.*, index.* - line_start.*});
+                        if (!foundQuote) {
+                            if (found[0] == '@') {
+                                std.log.err("Error at line {}, col {}: Expressions not implemented", .{ line.*, index.* - line_start.* });
                                 return error.NotImplemented;
                             }
 
                             if (std.mem.eql(u8, found[0..6], "__EVAL")) {
-                                std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{line.*, index.* - line_start.*});
+                                std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{ line.*, index.* - line_start.* });
                                 return error.NotImplemented;
                             }
                             var value = try scanInt(found, allocator) orelse
@@ -1214,7 +1234,6 @@ fn scanInt64Plain(ptr: []const u8) ?i64 {
 }
 
 fn scanInt64(input: []const u8, allocator: Allocator) !?Value {
-
     if (input.len == 0) return null;
 
     if (scanInt64Plain(input)) |val| {
@@ -1261,42 +1280,34 @@ fn scanFloat(ptr: []const u8, allocator: Allocator) !?Value {
     return null;
 }
 
-fn getWord(
-    input: []const u8,
-    index: *usize,
-    line: *usize,
-    line_start: *usize,
-    terminators: []const u8,
-    found_quote: *bool,
-    allocator: Allocator
-) ![]const u8 {
+fn getWord(input: []const u8, index: *usize, line: *usize, line_start: *usize, terminators: []const u8, found_quote: *bool, allocator: Allocator) ![]const u8 {
     var result = std.ArrayList(u8).init(allocator);
     defer result.deinit();
 
     skipWhitespace(input, index, line, line_start);
 
-    if(input[index.*] == '"') {
+    if (input[index.*] == '"') {
         index.* += 1;
         found_quote.* = true;
         while (index.* < input.len) {
             const c = input[index.*];
-            if(c == '"') {
+            if (c == '"') {
                 index.* += 1;
-                if(index.* < input.len and input[index.*] != '"') {
+                if (index.* < input.len and input[index.*] != '"') {
                     skipWhitespace(input, index, line, line_start);
 
-                    if(index.* < input.len and input[index.*] != '\\') {
+                    if (index.* < input.len and input[index.*] != '\\') {
                         return try result.toOwnedSlice();
                     }
                     index.* += 1;
-                    if(index.* < input.len and input[index.*] != 'n') {
-                        std.log.err("Error at line {}, col {}: invalid escape sequence", .{line.*, index.* - line_start.*});
+                    if (index.* < input.len and input[index.*] != 'n') {
+                        std.log.err("Error at line {}, col {}: invalid escape sequence", .{ line.*, index.* - line_start.* });
                         return error.SyntaxError;
                     }
                     skipWhitespace(input, index, line, line_start);
 
-                    if(index.* < input.len and input[index.*] != '"') {
-                        std.log.err("Error at line {}, col {}: expected '\"' after escape sequence", .{line.*, index.* - line_start.*});
+                    if (index.* < input.len and input[index.*] != '"') {
+                        std.log.err("Error at line {}, col {}: expected '\"' after escape sequence", .{ line.*, index.* - line_start.* });
                         return error.SyntaxError;
                     }
 
@@ -1307,8 +1318,8 @@ fn getWord(
                     try result.append('"');
                 }
             } else {
-                if(c == '\n' or c == '\r') {
-                    std.log.err("Error at line {}, col {}: End of line encountered", .{line.*, index.* - line_start.*});
+                if (c == '\n' or c == '\r') {
+                    std.log.err("Error at line {}, col {}: End of line encountered", .{ line.*, index.* - line_start.* });
                     return error.SyntaxError;
                 }
                 try result.append(c);
@@ -1316,24 +1327,24 @@ fn getWord(
                 continue;
             }
         }
-        std.log.err("Error at line {}, col {}: unterminated string literal", .{line.*, index.* - line_start.*});
+        std.log.err("Error at line {}, col {}: unterminated string literal", .{ line.*, index.* - line_start.* });
         return error.SyntaxError;
     } else {
         found_quote.* = false;
         var c = input[index.*];
         while (index.* < input.len and std.mem.indexOfScalar(u8, terminators, c) == null) {
-            if( c == '\n' or c == '\r' ) {
+            if (c == '\n' or c == '\r') {
                 while (true) {
                     skipWhitespace(input, index, line, line_start);
-                    if(input[index.*] != '#') {
+                    if (input[index.*] != '#') {
                         break;
                     }
-                    std.log.err("Error at line {}, col {}: Directives not implemented", .{line.*, index.* - line_start.*});
+                    std.log.err("Error at line {}, col {}: Directives not implemented", .{ line.*, index.* - line_start.* });
                     return error.NotImplemented;
                 }
                 c = input[index.*];
-                if(std.mem.indexOfScalar(u8, terminators, c) == null) {
-                    std.log.err("Error at line {}, col {}: Expected unquoted terminator got '{}'", .{line.*, index.* - line_start.*, c});
+                if (std.mem.indexOfScalar(u8, terminators, c) == null) {
+                    std.log.err("Error at line {}, col {}: Expected unquoted terminator got '{}'", .{ line.*, index.* - line_start.*, c });
                 }
             } else {
                 index.* += 1;
@@ -1348,9 +1359,9 @@ fn getWord(
 }
 
 fn skipWhitespace(input: []const u8, index: *usize, line: *usize, line_start: *usize) void {
-    while (index.* < input.len ) {
+    while (index.* < input.len) {
         const c = input[index.*];
-        if(c == '\n') {
+        if (c == '\n') {
             line.* += 1;
             index.* += 1;
             line_start.* = index.*;
