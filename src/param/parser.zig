@@ -240,18 +240,20 @@ pub const AstNode = union(enum) {
         }
         index.* += 1;
 
+        var expect_value = true;
         while (true) {
             skipWhitespace(input, index, line, line_start);
 
             if (index.* >= input.len) {
                 return error.SyntaxError;
             }
-            var current_char = input[index.*];
+            const current_char = input[index.*];
 
             switch (current_char) {
                 '{' => {
                     const nested_array = try parseArray(input, index, line, line_start, allocator);
                     try array.push(param.Value{ .array = nested_array });
+                    expect_value = false;
                 },
                 '#' => {
                     std.log.err("Error at line {}, col {}: Directives not implemented", .{ line.*, index.* - line_start.* });
@@ -265,49 +267,63 @@ pub const AstNode = union(enum) {
                     return error.NotImplemented;
                 },
                 '}' => {
+                    if (expect_value) {
+                        if (index.* > 0 and input[index.* - 1] != '{' and input[index.* - 1] != ',' and input[index.* - 1] != ';') {
+                            var temp_index = index.*;
+                            while (temp_index > 0 and std.ascii.isWhitespace(input[temp_index - 1])) temp_index -= 1;
+                            var value_start = temp_index;
+                            while (value_start > 0 and input[value_start - 1] != '{' and input[value_start - 1] != ',' and input[value_start - 1] != ';' and !std.ascii.isWhitespace(input[value_start - 1])) value_start -= 1;
+                            const found = input[value_start..temp_index];
+                            if (found.len > 0) {
+                                if (found[0] == '@') {
+                                    std.log.err("Error at line {}, col {}: Expressions not implemented", .{ line.*, value_start - line_start.* });
+                                    return error.NotImplemented;
+                                }
+                                if (found.len >= 6 and std.mem.eql(u8, found[0..6], "__EVAL")) {
+                                    std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{ line.*, value_start - line_start.* });
+                                    return error.NotImplemented;
+                                }
+                                var value = try scanInt(found, allocator) orelse
+                                    try scanFloat(found, allocator) orelse
+                                    try param.createValue(found, allocator);
+                                errdefer param.Value.deinit(&value, allocator);
+                                try array.push(value);
+                            }
+                        }
+                    }
                     index.* += 1;
                     return array;
                 },
                 ',' => {
                     index.* += 1;
+                    expect_value = true;
                 },
                 ';' => {
                     std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{ line.*, index.* - line_start.* });
                     index.* += 1;
+                    expect_value = true;
                 },
                 else => {
                     var foundQuote = false;
                     const found = try getWord(input, index, line, line_start, &[_]u8{ ',', ';', '}' }, &foundQuote, allocator);
                     defer allocator.free(found);
 
-                    current_char = input[index.*];
-
-                    if (current_char == ',' or current_char == ';') {
-                        if (current_char == ';') {
-                            std.log.warn("Warning at line {}, col {}: Using ';' as array separator is deprecated, use ',' instead.", .{ line.*, index.* - line_start.* });
+                    if (found.len > 0) {
+                        if (found[0] == '@') {
+                            std.log.err("Error at line {}, col {}: Expressions not implemented", .{ line.*, index.* - line_start.* });
+                            return error.NotImplemented;
                         }
-
-                        if (!foundQuote) {
-                            if (found[0] == '@') {
-                                std.log.err("Error at line {}, col {}: Expressions not implemented", .{ line.*, index.* - line_start.* });
-                                return error.NotImplemented;
-                            }
-
-                            if (std.mem.eql(u8, found[0..6], "__EVAL")) {
-                                std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{ line.*, index.* - line_start.* });
-                                return error.NotImplemented;
-                            }
-                            var value = try scanInt(found, allocator) orelse
-                                try scanFloat(found, allocator) orelse
-                                try param.createValue(found, allocator);
-                            errdefer param.Value.deinit(&value, allocator);
-                            try array.push(value);
-                        } else {
-                            var value = try param.createValue(found, allocator);
-                            errdefer param.Value.deinit(&value, allocator);
-                            try array.push(value);
+                        if (found.len >= 6 and std.mem.eql(u8, found[0..6], "__EVAL")) {
+                            std.log.err("Error at line {}, col {}: Evaluate not yet implemented", .{ line.*, index.* - line_start.* });
+                            return error.NotImplemented;
                         }
+                        var value = try scanInt(found, allocator) orelse
+                            try scanFloat(found, allocator) orelse
+                            try param.createValue(found, allocator);
+                        errdefer param.Value.deinit(&value, allocator);
+                        try array.push(value);
                     }
+                    expect_value = false;
                 },
             }
         }

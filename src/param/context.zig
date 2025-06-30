@@ -422,7 +422,7 @@ pub const Context = struct {
         for (nodes) |node| {
             switch (node) {
                 .delete => |del_name| {
-                    if(@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
+                    if (@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
                         return error.AccessDenied;
                     }
                     _ = self.removeClassUnlocked(del_name);
@@ -449,7 +449,7 @@ pub const Context = struct {
                     try self.addParameterUnlocked(param_node.name, value_clone);
                 },
                 .array => |array_node| {
-                    if(@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
+                    if (@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
                         return error.AccessDenied;
                     }
 

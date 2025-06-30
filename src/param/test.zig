@@ -40,14 +40,10 @@ test "parse param file" {
 
     try parsed.parse(addMissionScriptBuffer, true);
 
-    const context = parsed.retain();
-    defer context.release();
-
-    const syntax = try context.toSyntax(allocator);
+    const syntax = try parsed.toSyntax(allocator);
     defer allocator.free(syntax);
 
     std.debug.print("{s}", .{syntax});
-
 }
 
 test "Context.getParameter" {

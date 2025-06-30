@@ -85,4 +85,34 @@ pub const Root = struct {
         try context.parse(content, protect);
     }
 
+    pub fn toSyntax(self: *Root, allocator: std.mem.Allocator) ![]u8 {
+        var result = std.ArrayList(u8).init(allocator);
+        defer result.deinit();
+
+        if (self.context.children.get("CfgPatches")) |cfg_patches_ctx| {
+            const cfg_patches_syntax = try cfg_patches_ctx.toSyntax(allocator);
+            defer allocator.free(cfg_patches_syntax);
+            try result.appendSlice(cfg_patches_syntax);
+            try result.appendSlice("\n");
+        }
+
+        var param_it = self.context.params.valueIterator();
+        while (param_it.next()) |param_ptr| {
+            const param_syntax = try param_ptr.*.toSyntax(allocator);
+            defer allocator.free(param_syntax);
+            try result.appendSlice(param_syntax);
+            try result.appendSlice("\n");
+        }
+
+        var child_it = self.context.children.iterator();
+        while (child_it.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, "CfgPatches")) continue;
+            const child_syntax = try entry.value_ptr.*.toSyntax(allocator);
+            defer allocator.free(child_syntax);
+            try result.appendSlice(child_syntax);
+            try result.appendSlice("\n");
+        }
+
+        return result.toOwnedSlice();
+    }
 };
