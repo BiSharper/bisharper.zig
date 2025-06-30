@@ -12,8 +12,8 @@ pub const Access = enum(i8) {
     ReadOnly = 2,
     ReadOnlyVerified = 3,
 
-    pub fn toSyntax(self: Access, allocator: Allocator) ![]const u8 {
-        return try std.fmt.allocPrint(allocator, "access = {d};", .{@intFromEnum(self)});
+    pub fn toSyntax(self: Access, allocator: Allocator) Allocator.Error![]const u8 {
+        return try std.fmt.allocPrint(allocator, "access = {d};\n", .{@intFromEnum(self)});
     }
 };
 
@@ -42,7 +42,7 @@ pub const Context = struct {
     derivatives: AtomicUsize,
     rw_lock: std.Thread.RwLock = .{},
 
-    pub fn toSyntax(self: *Context, allocator: Allocator) ![]u8 {
+    pub fn toSyntax(self: *Context, allocator: Allocator) Allocator.Error![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
 
@@ -286,7 +286,9 @@ pub const Context = struct {
         self.clearUnlocked();
     }
 
-    fn clearUnlocked(self: *Context,) void {
+    fn clearUnlocked(
+        self: *Context,
+    ) void {
         var child_iter = self.children.keyIterator();
         while (child_iter.next()) |child_ptr| {
             _ = self.removeClassUnlocked(child_ptr.*);

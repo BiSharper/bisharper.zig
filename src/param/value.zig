@@ -7,7 +7,7 @@ pub const Parameter = struct {
     name: []const u8,
     value: Value,
 
-    pub fn toSyntax(self: *Parameter, allocator: Allocator) ![]u8 {
+    pub fn toSyntax(self: *Parameter, allocator: Allocator) Allocator.Error![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
 
@@ -131,7 +131,7 @@ pub const Array = struct {
         self.values.clearAndFree();
     }
 
-    pub fn toSyntax(self: *const Array, allocator: Allocator) ![]u8 {
+    pub fn toSyntax(self: *const Array, allocator: Allocator) Allocator.Error![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
 
@@ -146,7 +146,7 @@ pub const Array = struct {
             allocator.free(next_slice);
         }
 
-        try result.append(']');
+        try result.append('}');
 
         return result.toOwnedSlice();
     }
@@ -188,7 +188,7 @@ pub const Value = union(enum) {
         };
     }
 
-    pub fn toSyntax(self: *const Value, allocator: Allocator) ![]u8 {
+    pub fn toSyntax(self: *const Value, allocator: Allocator) Allocator.Error![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
 
@@ -204,7 +204,7 @@ pub const Value = union(enum) {
                 try result.appendSlice(s);
             },
             .f32 => |v| {
-                const s = try std.fmt.allocPrint(allocator, "{.6}", .{v});
+                const s = try std.fmt.allocPrint(allocator, "{d:.6}", .{v});
                 defer allocator.free(s);
                 try result.appendSlice(s);
             },

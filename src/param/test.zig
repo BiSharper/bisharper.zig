@@ -29,11 +29,6 @@ test "parse param file" {
 
     const context = parsed.retain();
     defer context.release();
-    //
-    // const syntax = try context.toSyntax(allocator);
-    // defer allocator.free(syntax);
-    //
-    // std.debug.print("{s}\n", .{syntax});
 }
 
 test "Context.getParameter" {
