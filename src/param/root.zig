@@ -5,6 +5,7 @@ const ctx = @import("context.zig");
 
 const Allocator = std.mem.Allocator;
 
+pub const Access = ctx.Access;
 pub const Value = value_mod.Value;
 pub const Array = value_mod.Array;
 pub const Parameter = value_mod.Parameter;
@@ -14,7 +15,6 @@ pub const ContextFlags = ctx.ContextFlags;
 pub const AtomicUsize = ctx.AtomicUsize;
 
 pub const createValue = value_mod.createValue;
-
 
 pub fn database(name: []const u8, allocator: Allocator) !*Root {
     const name_copy = try allocator.dupe(u8, name);
@@ -62,7 +62,6 @@ pub fn parse(name: []const u8, content: []const u8, protect: bool, allocator: Al
     return root;
 }
 
-
 pub const Root = struct {
     allocator: Allocator,
     name: []u8,
@@ -86,4 +85,3 @@ pub const Root = struct {
         try context.parse(content, protect);
     }
 };
-
