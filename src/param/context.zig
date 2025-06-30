@@ -27,6 +27,11 @@ pub const ContextFlags = packed struct {
     }
 };
 
+// Helper to generate indentation
+fn writeIndent(result: *std.ArrayList(u8), indent: usize) !void {
+    for (0..indent) |_| try result.append(' ');
+}
+
 pub const Context = struct {
     name: []const u8,
     access: Access = .Default,
@@ -42,10 +47,11 @@ pub const Context = struct {
     derivatives: AtomicUsize,
     rw_lock: std.Thread.RwLock = .{},
 
-    pub fn toSyntax(self: *Context, allocator: Allocator) Allocator.Error![]u8 {
+    pub fn toSyntax(self: *Context, allocator: Allocator, indent: usize) Allocator.Error![]u8 {
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
 
+        try writeIndent(&result, indent);
         try result.appendSlice("class ");
         try result.appendSlice(self.name);
 
@@ -58,7 +64,10 @@ pub const Context = struct {
 
         const s = try self.access.toSyntax(allocator);
         defer allocator.free(s);
-        try result.appendSlice(s);
+        if (self.access != .Default) {
+            try writeIndent(&result, indent + 4);
+            try result.appendSlice(s);
+        }
 
         {
             self.rw_lock.lockShared();
@@ -68,20 +77,21 @@ pub const Context = struct {
             while (param_it.next()) |param_ptr| {
                 const param_syntax = try param_ptr.*.toSyntax(allocator);
                 defer allocator.free(param_syntax);
+                try writeIndent(&result, indent + 4);
                 try result.appendSlice(param_syntax);
                 try result.appendSlice("\n");
             }
 
             var child_it = self.children.valueIterator();
             while (child_it.next()) |child_ptr| {
-                const child_syntax = try child_ptr.*.toSyntax(allocator);
+                const child_syntax = try child_ptr.*.toSyntax(allocator, indent + 4);
                 defer allocator.free(child_syntax);
-
                 try result.appendSlice(child_syntax);
                 try result.appendSlice("\n");
             }
         }
 
+        try writeIndent(&result, indent);
         try result.appendSlice("};");
 
         return result.toOwnedSlice();

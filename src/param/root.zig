@@ -90,7 +90,7 @@ pub const Root = struct {
         defer result.deinit();
 
         if (self.context.children.get("CfgPatches")) |cfg_patches_ctx| {
-            const cfg_patches_syntax = try cfg_patches_ctx.toSyntax(allocator);
+            const cfg_patches_syntax = try cfg_patches_ctx.toSyntax(allocator, 0);
             defer allocator.free(cfg_patches_syntax);
             try result.appendSlice(cfg_patches_syntax);
             try result.appendSlice("\n");
@@ -107,7 +107,7 @@ pub const Root = struct {
         var child_it = self.context.children.iterator();
         while (child_it.next()) |entry| {
             if (std.mem.eql(u8, entry.key_ptr.*, "CfgPatches")) continue;
-            const child_syntax = try entry.value_ptr.*.toSyntax(allocator);
+            const child_syntax = try entry.value_ptr.*.toSyntax(allocator, 0);
             defer allocator.free(child_syntax);
             try result.appendSlice(child_syntax);
             try result.appendSlice("\n");
