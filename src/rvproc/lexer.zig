@@ -49,8 +49,18 @@ const Lexer = struct {
 
     pub fn skipLineComment(self: *Lexer) void {
         while (self.position < self.content.len and self.content[self.position] != '\n') : (self.position += 1) {}
-
     }
+
+    pub fn skipWhitespace(self: *Lexer) void {
+        while (self.position < self.content.len and (self.content[self.position] != '\n' and self.content[self.position] < 33)) : (self.position += 1) {}
+    }
+
+    pub fn scanString(self: *Lexer, terminators: []const u8) void {
+        const start = self.position;
+        while (self.position < self.content.len and std.mem.indexOfScalar(u8, terminators, self.content[self.position]) == null) : (self.position += 1) {}
+        self.slice = self.content[start..self.position];
+    }
+
 
     pub fn nextToken(self: *Lexer) Token {
         while (self.content[self.position] == '\r') : (self.position += 1) {}

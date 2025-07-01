@@ -46,19 +46,58 @@ pub const Context = struct {
 
         const lexer = Lexer.init(context.allocator, content);
         var quoted = false;
-        while (lexer.nextToken()) | token |{
+        var token = lexer.nextToken();
+        while (true){
             if (token == Token.EOF) break;
 
             if (token == Token.Quote) {
                 quoted = !quoted;
+                token = lexer.nextToken();
                 continue;
             }
             switch (token.*) {
                 Token.NewFile or Token.NewLine => {
+                    lexer.skipWhitespace();
+                    token = lexer.nextToken();
+                    if(token == Token.Hash) {
+                        token = lexer.nextToken();
+                        lexer.skipWhitespace();
+                        switch(token.*) {
+                            Token.Include => {
+                                token = lexer.nextToken();
+                                if(token != Token.Quote and token != Token.LeftAngle) {
+                                    return error.IncludeError;
+                                }
 
+                                lexer.scanString(if (token == Token.Quote) &.{'"'} else &.{'>'});
+                                lexer.position += 1; //skip string terminator
+
+                                const contents = try include(lexer.slice) orelse return error.FileNotFound;
+                                const sub_result = try context.preprocess(path, contents, include);
+                                try out.appendSlice(sub_result);
+                                token = lexer.nextToken();
+                            },
+                            Token.Define => {},
+                            Token.IfDef => {},
+                            Token.IfNDef => {},
+                            Token.EndIf => {},
+                            Token.Else => {},
+                            Token.Undef => {},
+                            else => {
+                                // Unrecognized directive
+                                return error.UnrecognizedDirective;
+                            }
+                        }
+                    }
                 },
-                Token.BeginBlockComment => lexer.skipBlockComment(),
-                Token.BeginLineComment => lexer.skipLineComment(),
+                Token.BeginBlockComment => {
+                    lexer.skipBlockComment();
+                    token = lexer.nextToken();
+                },
+                Token.BeginLineComment => {
+                    lexer.skipLineComment();
+                    token = lexer.nextToken();
+                },
                 Token.Text => {
 
                 },
