@@ -1,10 +1,21 @@
 ﻿const std = @import("std");
 const Allocator = std.mem.Allocator;
-
+const lex = @import("lexer.zig");
+const Token = lex.Token;
+const Lexer = lex.Lexer;
 
 pub const Define = struct{
     name: []const u8,
+    args: []const []const u8,
     value: []const u8,
+
+    pub fn evaluate(self: *const Define, context: *Context, args: []const []const u8) ![]const u8 {
+        _ = self;
+        _ = context;
+        _ = args;
+
+        return error.Unimplemented;
+    }
 };
 
 pub const PreprocessResult = struct{
@@ -33,42 +44,26 @@ pub const Context = struct {
         var out = std.ArrayList(u8).init(context.allocator);
         defer out.deinit();
 
-        var i: usize = 0;
+        const lexer = Lexer.init(context.allocator, content);
         var quoted = false;
-        while (i < content.len) : (i += 1) {
-            const current_char = content[i];
-            if(current_char == '"') {
-                quoted = !quoted;
-            }
+        while (lexer.nextToken()) | token |{
+            if (token == Token.EOF) break;
 
-            if(quoted) {
-                try out.append(current_char);
+            if (token == Token.Quote) {
+                quoted = !quoted;
                 continue;
             }
+            switch (token.*) {
+                Token.NewFile or Token.NewLine => {
 
+                },
+                Token.BeginBlockComment => lexer.skipBlockComment(),
+                Token.BeginLineComment => lexer.skipLineComment(),
+                Token.Text => {
 
-            switch (current_char) {
-                '/' => {
-                    current_char = content[i + 1];
-                    switch (current_char) {
-                        '/' => {
-                            while (i < content.len and content[i] != '\n') : (i += 1) {}
-                        },
-                        '*' => {
-                            while (i + 1 < content.len) : (i += 1) {
-                                if (content[i] == '*' and content[i + 1] == '/') {
-                                    i += 1;
-                                    break;
-                                }
-                            }
-                        },
-                        else => {
-                            try out.append('/');
-                        }
-                    }
-                }
+                },
+                else => try out.appendSlice(lexer.slice)
             }
-
         }
 
         out.toOwnedSlice();
