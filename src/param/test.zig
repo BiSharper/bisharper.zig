@@ -26,19 +26,24 @@ pub fn readFileFromParts(allocator: std.mem.Allocator, path_parts: []const []con
     return readFileContents(allocator, file_path);
 }
 
+//document tests
 test "parse param file" {
     const allocator = std.testing.allocator;
+    const gameBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "dayz.cpp" });
+    defer allocator.free(gameBuffer);
 
-    const mainBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "dayz.cpp" });
-    defer allocator.free(mainBuffer);
-
-    const parsed = try param.parse("config", mainBuffer, false, allocator);
+    const parsed = try param.parse("config", gameBuffer, false, allocator);
     defer parsed.release();
-    //
-    // const addMissionScriptBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "addMissionScript.cpp" });
-    // defer allocator.free(addMissionScriptBuffer);
-    //
-    // try parsed.parse(addMissionScriptBuffer, true);
+
+    const modBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "addMissionScript.cpp" });
+    defer allocator.free(modBuffer);
+
+    try parsed.parse(modBuffer, true);
+
+    const patchBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "addMissionScript.cpp" });
+    defer allocator.free(patchBuffer);
+
+    try parsed.parse(patchBuffer, true);
 
     const syntax = try parsed.toSyntax(allocator);
     defer allocator.free(syntax);

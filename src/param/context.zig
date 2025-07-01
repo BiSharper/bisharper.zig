@@ -477,9 +477,20 @@ pub const Context = struct {
                             self.access = parsed_access;
                         }
                     } else {
+
                         var value_clone = try param_node.value.clone(alloc);
                         errdefer value_clone.deinit(alloc);
-                        try self.addParameterUnlocked(param_node.name, value_clone);
+                        const gop = try self.params.getOrPut(param_node.name);
+                        if (gop.found_existing) {
+                            if (@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
+                                return error.AccessDenied;
+                            }
+                            const existing_param = gop.value_ptr.*;
+
+                            existing_param.value.deinit(alloc);
+                            existing_param.value = value_clone;
+                        } else try self.addParameterUnlocked(param_node.name, value_clone);
+
                     }
                 },
                 .array => |array_node| {
