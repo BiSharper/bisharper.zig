@@ -57,6 +57,10 @@ pub const AstNode = union(enum) {
         while (index.* < input.len) {
             skipWhitespace(input, index, line, line_start);
 
+            if(index.* >= input.len) {
+                break;
+            }
+
             var c = input[index.*];
             if (c == '#') {
                 //todo

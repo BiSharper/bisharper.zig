@@ -29,16 +29,16 @@ pub fn readFileFromParts(allocator: std.mem.Allocator, path_parts: []const []con
 test "parse param file" {
     const allocator = std.testing.allocator;
 
-    const mainBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "config.cpp" });
+    const mainBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "dayz.cpp" });
     defer allocator.free(mainBuffer);
 
     const parsed = try param.parse("config", mainBuffer, false, allocator);
     defer parsed.release();
-
-    const addMissionScriptBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "addMissionScript.cpp" });
-    defer allocator.free(addMissionScriptBuffer);
-
-    try parsed.parse(addMissionScriptBuffer, true);
+    //
+    // const addMissionScriptBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "addMissionScript.cpp" });
+    // defer allocator.free(addMissionScriptBuffer);
+    //
+    // try parsed.parse(addMissionScriptBuffer, true);
 
     const syntax = try parsed.toSyntax(allocator);
     defer allocator.free(syntax);

@@ -388,7 +388,15 @@ pub const Context = struct {
         context: *Context,
     };
 
-    fn findEntry(self: *Context, name: []const u8, parent: bool, base: bool) ?Entry {
+    fn findClassUnlocked(self: *Context, name: []const u8, parent: bool, base: bool) ?*Context {
+        const ent = self.findEntryUnlocked(name, parent, base) orelse return null;
+        if (ent == .context) {
+            return ent.context;
+        }
+        return null;
+    }
+
+    fn findEntryUnlocked(self: *Context, name: []const u8, parent: bool, base: bool) ?Entry {
         if (self.children.get(name)) |child| {
             return .{ .context = child };
         }
@@ -399,7 +407,7 @@ pub const Context = struct {
 
         if (base) {
             if (self.base) |base_ctx| {
-                if (base_ctx.findEntry(name, false, base)) |entry| {
+                if (base_ctx.findEntryUnlocked(name, false, base)) |entry| {
                     return entry;
                 }
             }
@@ -407,7 +415,7 @@ pub const Context = struct {
 
         if (parent) {
             if (self.parent) |parent_ctx| {
-                if (parent_ctx.findEntry(name, true, base)) |entry| {
+                if (parent_ctx.findEntryUnlocked(name, true, base)) |entry| {
                     return entry;
                 }
             }
@@ -429,9 +437,10 @@ pub const Context = struct {
             return error.AccessDenied;
         }
 
-        for (nodes) |node| {
+        for (nodes) |node | {
             switch (node) {
                 .delete => |del_name| {
+                    std.debug.print("delete '{s}'\n", .{del_name});
                     if (@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
                         return error.AccessDenied;
                     }
@@ -446,17 +455,32 @@ pub const Context = struct {
                     }
 
                     if (class_node.extends) |extends_name| {
-                        child_ctx.extendUnlocked(self.children.get(extends_name) orelse return error.BaseClassNotFound);
+                        const entry = self.findClassUnlocked(extends_name, true, true);
+                        child_ctx.extendUnlocked(entry orelse return error.BaseClassNotFound);
                     }
+                    const child_nodes = class_node.nodes orelse &[_]param.AstNode{};
 
-                    try child_ctx.updateUnlocked(class_node.nodes orelse &[_]param.AstNode{}, protect);
+                    try child_ctx.updateUnlocked(@constCast(child_nodes), protect);
 
                     child_ctx.release();
                 },
                 .param => |param_node| {
-                    var value_clone = try param_node.value.clone(alloc);
-                    errdefer value_clone.deinit(alloc);
-                    try self.addParameterUnlocked(param_node.name, value_clone);
+                    if(std.mem.eql(u8, param_node.name, "access")) {
+                        if(self.access == .Default) {
+                            const parsed_access = switch (param_node.value.i32) {
+                                0 => Access.ReadWrite,
+                                1 => Access.ReadCreate,
+                                2 => Access.ReadOnly,
+                                3 => Access.ReadOnlyVerified,
+                                else => return error.InvalidAccessValue,
+                            };
+                            self.access = parsed_access;
+                        }
+                    } else {
+                        var value_clone = try param_node.value.clone(alloc);
+                        errdefer value_clone.deinit(alloc);
+                        try self.addParameterUnlocked(param_node.name, value_clone);
+                    }
                 },
                 .array => |array_node| {
                     if (@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
@@ -519,13 +543,9 @@ pub const Context = struct {
         var children_to_deinit = std.ArrayList(*Context).init(self.root.allocator);
         defer children_to_deinit.deinit();
 
-        {
-            self.rw_lock.lockShared();
-            defer self.rw_lock.unlockShared();
-            var it = self.children.valueIterator();
-            while (it.next()) |child_ptr| {
-                children_to_deinit.append(child_ptr.*) catch @panic("OOM in deinit");
-            }
+        var it = self.children.valueIterator();
+        while (it.next()) |child_ptr| {
+            children_to_deinit.append(child_ptr.*) catch @panic("OOM in deinit");
         }
 
         for (children_to_deinit.items) |child| {
@@ -533,9 +553,6 @@ pub const Context = struct {
         }
 
         {
-            self.rw_lock.lock();
-            defer self.rw_lock.unlock();
-
             std.debug.assert(self.children.count() == 0);
             self.children.deinit();
 
@@ -550,8 +567,8 @@ pub const Context = struct {
         self.root.allocator.free(@volatileCast(self.parent_refs));
 
         if (self.parent) |parent| {
-            self.rw_lock.lock();
-            defer self.rw_lock.unlock();
+            parent.rw_lock.lock();
+            defer parent.rw_lock.unlock();
 
             if (parent.children.fetchRemove(self.name)) |removed_entry| {
                 self.root.allocator.free(removed_entry.key);
