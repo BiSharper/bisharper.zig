@@ -171,13 +171,13 @@ pub const Context = struct {
         return result;
     }
 
-    pub fn addParameter(self: *Context, name: []const u8, value: anytype) !void {
+    pub fn addParameter(self: *Context, name: []const u8, value: anytype, protect: bool) !void {
         self.rw_lock.lock();
         defer self.rw_lock.unlock();
-        return self.addParameterUnlocked(name, value);
+        return self.addParameterUnlocked(name, value, protect);
     }
 
-    fn addParameterUnlocked(self: *Context, name: []const u8, value: anytype) !void {
+    fn addParameterUnlocked(self: *Context, name: []const u8, value: anytype, protect: bool) !void {
         const alloc = self.root.allocator;
 
         if (std.mem.eql(u8, name, "access")) {
@@ -187,16 +187,27 @@ pub const Context = struct {
         const owned_name = try alloc.dupe(u8, name);
         errdefer alloc.free(owned_name);
 
+        var owned_value = try param.createValue(value, alloc);
+        errdefer owned_value.deinit(alloc);
+
         const gop = try self.params.getOrPut(owned_name);
         if (gop.found_existing) {
+
+            if(protect and @intFromEnum(self.access) > @intFromEnum(Access.ReadWrite)) {
+                return error.InvalidAccess;
+            }
+
+            const found = gop.value_ptr.*;
+            found.deinit();
+
+            found.value = owned_value;
+
             return error.ParameterAlreadyExists;
         }
 
         const par = try alloc.create(param.Parameter);
         errdefer alloc.destroy(par);
 
-        const owned_value = try param.createValue(value, alloc);
-        errdefer param.Value.deinit(&owned_value, alloc);
 
         par.* = .{
             .parent = self,
@@ -477,20 +488,9 @@ pub const Context = struct {
                             self.access = parsed_access;
                         }
                     } else {
-
                         var value_clone = try param_node.value.clone(alloc);
                         errdefer value_clone.deinit(alloc);
-                        const gop = try self.params.getOrPut(param_node.name);
-                        if (gop.found_existing) {
-                            if (@intFromEnum(access) >= @intFromEnum(Access.ReadCreate)) {
-                                return error.AccessDenied;
-                            }
-                            const existing_param = gop.value_ptr.*;
-
-                            existing_param.value.deinit(alloc);
-                            existing_param.value = value_clone;
-                        } else try self.addParameterUnlocked(param_node.name, value_clone);
-
+                        try self.addParameterUnlocked(param_node.name, value_clone, protect);
                     }
                 },
                 .array => |array_node| {
@@ -513,7 +513,7 @@ pub const Context = struct {
                             } else {
                                 var value_clone = try param.createValue(try array_node.value.clone(alloc), alloc);
                                 errdefer value_clone.deinit(alloc);
-                                try self.addParameterUnlocked(array_node.name, value_clone);
+                                try self.addParameterUnlocked(array_node.name, value_clone, protect);
                             }
                         },
                         .Sub => {
@@ -530,7 +530,7 @@ pub const Context = struct {
                             } else {
                                 var value_clone = try param.createValue(try array_node.value.clone(alloc), alloc);
                                 errdefer value_clone.deinit(alloc);
-                                try self.addParameterUnlocked(array_node.name, value_clone);
+                                try self.addParameterUnlocked(array_node.name, value_clone, protect);
                             }
                         },
                     }
