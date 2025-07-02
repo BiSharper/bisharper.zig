@@ -28,12 +28,12 @@ pub const OpenIncludeFn = fn (include: []const u8) ?[]const u8;
 
 pub const Context = struct {
     allocator: Allocator,
-    defines: std.ArrayList(Define),
+    defines: std.StringHashMap(*Define),
 
     pub fn init(allocator: Allocator) Context {
         return Context{
             .allocator = allocator,
-            .defines = std.ArrayList(Define).init(allocator),
+            .defines = std.StringHashMap(*Define).init(allocator),
         };
     }
 
@@ -70,14 +70,87 @@ pub const Context = struct {
                                 }
 
                                 lexer.scanString(if (token == Token.Quote) &.{'"'} else &.{'>'});
-                                lexer.position += 1; //skip string terminator
+                                lexer.position += 1;
 
                                 const contents = try include(lexer.slice) orelse return error.FileNotFound;
                                 const sub_result = try context.preprocess(path, contents, include);
                                 try out.appendSlice(sub_result);
                                 token = lexer.nextToken();
                             },
-                            Token.Define => {},
+                            Token.Define => {
+                                token = lexer.nextToken();
+                                const define = try context.allocator.create(Define);
+                                errdefer context.allocator.destroy(define);
+
+                                const owned_name = try context.allocator.dupe(u8, lexer.slice);
+                                errdefer context.allocator.free(owned_name);
+
+                                token = lexer.nextToken();
+                                const args = bkf: {
+                                    if(token == .LeftParen) {
+                                        lexer.skipWhitespace();
+                                        token = lexer.nextToken();
+                                        const args = std.ArrayList([]const u8).init(context.allocator);
+                                        defer args.deinit();
+
+                                        var count = 0;
+                                        while (token == .Text) {
+                                            const owned_arg = try context.allocator.dupe(u8, lexer.slice);
+                                            errdefer context.allocator.free(owned_arg);
+
+                                            try args.append(owned_arg);
+                                            count += 1;
+                                            lexer.skipWhitespace();
+
+                                            token = lexer.nextToken();
+
+                                            if(token == .Comma) {
+                                                lexer.skipWhitespace();
+                                                token = lexer.nextToken();
+                                            }
+                                        }
+
+                                        if(token != .RightParen) {
+                                            return error.DefineError;
+                                        }
+
+                                        lexer.skipWhitespace();
+                                        token = lexer.nextToken();
+                                        break :bkf try args.toOwnedSlice();
+                                    } else break :bkf &.{};
+                                };
+
+                                if(lexer.slice[0] == 32) {
+                                    lexer.skipWhitespace();
+                                    token = lexer.nextToken();
+                                }
+
+                                const value = blk: {
+                                    const val = std.ArrayList(u8).init(context.allocator);
+                                    defer val.deinit();
+
+                                    while (token != .NewLine and token != .EOF) {
+                                        switch (token.*) {
+                                            Token.BeginLineComment => lexer.skipLineComment(),
+                                            Token.BeginBlockComment => lexer.skipBlockComment(),
+                                            !Token.LineBreak => val.appendSlice(lexer.slice)
+                                        }
+                                        token = lexer.nextToken();
+                                    }
+
+                                    break :blk try val.toOwnedSlice();
+                                };
+
+                                define.* = .{
+                                    .name = owned_name,
+                                    .args = args,
+                                    .value = value
+                                };
+
+                                context.defines.put(owned_name, define);
+
+
+                            },
                             Token.IfDef => {},
                             Token.IfNDef => {},
                             Token.EndIf => {},
