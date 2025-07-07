@@ -88,7 +88,7 @@ pub const Parameter = struct {
         const allocator = self.parent.root.allocator;
         allocator.free(self.name);
         self.value.deinit(allocator);
-        allocator.destroy(self);
+        self.parent.root.parpool.release(self);
     }
 };
 

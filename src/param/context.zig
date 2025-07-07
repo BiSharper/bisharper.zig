@@ -203,8 +203,8 @@ pub const Context = struct {
             return;
         }
 
-        const par = try alloc.create(param.Parameter);
-        errdefer alloc.destroy(par);
+        const par = try self.root.parpool.acquire();
+        errdefer self.root.parpool.release(par);
 
         par.* = .{
             .parent = self,
@@ -355,8 +355,8 @@ pub const Context = struct {
     fn createClassUnlocked(self: *Context, name: []const u8, extends: ?*Context) !*Context {
         const alloc = self.root.allocator;
 
-        const child_ctx = try alloc.create(Context);
-        errdefer alloc.destroy(child_ctx);
+        const child_ctx = try self.root.cpool.acquire();
+        errdefer self.root.cpool.release(child_ctx);
 
         const parent_strongs = try alloc.alloc(*AtomicUsize, self.parent_refs.len + 1);
         errdefer alloc.free(parent_strongs);
@@ -586,13 +586,15 @@ pub const Context = struct {
                     self.root.allocator.free(removed_entry.key);
                 }
             }
-            self.root.allocator.destroy(self);
+            self.root.cpool.release(self);
         } else {
             const root_ptr = self.root;
             const allocator = self.root.allocator;
 
             allocator.free(self.root.name);
-            allocator.destroy(self.root.context);
+            root_ptr.parpool.deinit();
+            root_ptr.cpool.release(self.root.context);
+            root_ptr.cpool.deinit();
             allocator.destroy(root_ptr);
         }
     }

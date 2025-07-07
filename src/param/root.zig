@@ -2,6 +2,7 @@ const std = @import("std");
 const value_mod = @import("value.zig");
 const parser = @import("parser.zig");
 const ctx = @import("context.zig");
+const mempool = @import("../mem/pools.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -13,6 +14,9 @@ pub const AstNode = parser.AstNode;
 pub const Context = ctx.Context;
 pub const ContextFlags = ctx.ContextFlags;
 pub const AtomicUsize = ctx.AtomicUsize;
+pub const CPool = mempool.ObjectPool(Context);
+pub const ParPool = mempool.ObjectPool(Parameter);
+
 
 pub const createValue = value_mod.createValue;
 
@@ -23,14 +27,22 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
     const file = try allocator.create(Root);
     errdefer allocator.destroy(file);
 
-    const root_ctx = try allocator.create(Context);
-    errdefer allocator.destroy(root_ctx);
+    var param_pool: ParPool = ParPool.init(allocator);
+    errdefer param_pool.deinit();
+
+    var context_pool: CPool = CPool.init(allocator);
+    errdefer context_pool.deinit();
+
+    const root_ctx = try context_pool.acquire();
 
     const parent_strongs = try allocator.alloc(*AtomicUsize, 1);
     errdefer allocator.free(parent_strongs);
 
+
     file.* = .{
         .allocator = allocator,
+        .cpool = context_pool,
+        .parpool = param_pool,
         .name = name_copy,
         .context = root_ctx,
     };
@@ -64,6 +76,9 @@ pub fn parse(name: []const u8, content: []const u8, protect: bool, allocator: Al
 
 pub const Root = struct {
     allocator: Allocator,
+    cpool: CPool,
+    parpool: ParPool,
+
     name: []u8,
     context: *Context,
 
