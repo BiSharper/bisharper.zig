@@ -21,9 +21,6 @@ pub const ParPool = mempool.ObjectPool(Parameter);
 pub const createValue = value_mod.createValue;
 
 pub fn database(name: []const u8, allocator: Allocator) !*Root {
-    const name_copy = try allocator.dupe(u8, name);
-    errdefer allocator.free(name_copy);
-
     const file = try allocator.create(Root);
     errdefer allocator.destroy(file);
 
@@ -35,6 +32,11 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
 
     const root_ctx = try context_pool.acquire();
 
+    var string_pool = mempool.ArenaStringPool.init(allocator);
+    errdefer string_pool.deinit();
+
+    const name_copy = try string_pool.intern(name);
+
     const parent_strongs = try allocator.alloc(*AtomicUsize, 1);
     errdefer allocator.free(parent_strongs);
 
@@ -43,6 +45,8 @@ pub fn database(name: []const u8, allocator: Allocator) !*Root {
         .allocator = allocator,
         .cpool = context_pool,
         .parpool = param_pool,
+        .spool = string_pool,
+
         .name = name_copy,
         .context = root_ctx,
     };
@@ -78,8 +82,9 @@ pub const Root = struct {
     allocator: Allocator,
     cpool: CPool,
     parpool: ParPool,
+    spool:   mempool.ArenaStringPool,
 
-    name: []u8,
+    name: []const u8,
     context: *Context,
 
     pub fn retain(self: *Root) *Context {

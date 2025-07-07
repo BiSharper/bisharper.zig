@@ -192,15 +192,17 @@ pub const Context = struct {
 
         const gop = try self.params.getOrPut(owned_name);
         if (gop.found_existing) {
-            if (protect and @intFromEnum(self.access) > @intFromEnum(Access.ReadWrite)) {
+
+            if(protect and @intFromEnum(self.access) > @intFromEnum(Access.ReadWrite)) {
                 return error.InvalidAccess;
             }
 
             const found = gop.value_ptr.*;
-            found.value.deinit(alloc);
+            found.deinit();
+
             found.value = owned_value;
 
-            return;
+            return error.ParameterAlreadyExists;
         }
 
         const par = try self.root.parpool.acquire();
@@ -363,10 +365,10 @@ pub const Context = struct {
 
         @memcpy(parent_strongs[1..], self.parent_refs);
 
-        const owned_name = try alloc.dupe(u8, name);
+        const owned_name = try self.root.spool.intern(name);
+
         const gop = try self.children.getOrPut(owned_name);
         if (gop.found_existing) {
-            alloc.free(owned_name);
             return error.NameAlreadyExists;
         }
 
@@ -445,7 +447,7 @@ pub const Context = struct {
             return error.AccessDenied;
         }
 
-        for (nodes) |node| {
+        for (nodes) |node | {
             switch (node) {
                 .delete => |del_name| {
                     std.debug.print("delete '{s}'\n", .{del_name});
@@ -473,8 +475,8 @@ pub const Context = struct {
                     child_ctx.release();
                 },
                 .param => |param_node| {
-                    if (std.mem.eql(u8, param_node.name, "access")) {
-                        if (self.access == .Default) {
+                    if(std.mem.eql(u8, param_node.name, "access")) {
+                        if(self.access == .Default) {
                             const parsed_access = switch (param_node.value.i32) {
                                 0 => Access.ReadWrite,
                                 1 => Access.ReadCreate,
@@ -543,12 +545,6 @@ pub const Context = struct {
     }
 
     fn deinit(self: *Context) void {
-        if (self.derivatives.load(.acquire) > 0) {
-            self.flags.pending_cleanup = true;
-            return;
-        }
-        self.flags.pending_cleanup = false;
-
         if (self.base) |base| {
             _ = base.derivatives.rmw(.Sub, 1, .acq_rel);
             base.checkBaseCleanup();
@@ -566,14 +562,17 @@ pub const Context = struct {
             child.deinit();
         }
 
-        self.children.deinit();
+        {
+            std.debug.assert(self.children.count() == 0);
+            self.children.deinit();
 
-        var param_it = self.params.valueIterator();
-        while (param_it.next()) |param_ptr| {
-            param_ptr.*.deinit();
+            var param_it = self.params.valueIterator();
+            while (param_it.next()) |param_ptr| {
+                param_ptr.*.deinit();
+            }
+
+            self.params.deinit();
         }
-
-        self.params.deinit();
 
         self.root.allocator.free(@volatileCast(self.parent_refs));
 
@@ -581,20 +580,17 @@ pub const Context = struct {
             parent.rw_lock.lock();
             defer parent.rw_lock.unlock();
 
-            if (!self.flags.pending_cleanup) {
-                if (parent.children.fetchRemove(self.name)) |removed_entry| {
-                    self.root.allocator.free(removed_entry.key);
-                }
-            }
+            _ = parent.children.remove(self.name);
             self.root.cpool.release(self);
         } else {
             const root_ptr = self.root;
             const allocator = self.root.allocator;
 
-            allocator.free(self.root.name);
             root_ptr.parpool.deinit();
             root_ptr.cpool.release(self.root.context);
             root_ptr.cpool.deinit();
+            root_ptr.spool.deinit();
+
             allocator.destroy(root_ptr);
         }
     }

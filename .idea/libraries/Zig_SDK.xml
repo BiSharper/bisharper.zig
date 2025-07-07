@@ -3,7 +3,7 @@
     <CLASSES />
     <JAVADOC />
     <SOURCES>
-      <root url="file://$USER_HOME$/.local/share/zig/0.14.0/lib/std" />
+      <root url="file:///usr/lib/zig/std" />
     </SOURCES>
   </library>
 </component>
