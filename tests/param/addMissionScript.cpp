@@ -17,6 +17,7 @@ class CfgMods
 {
     class JM_CommunityFramework
     {
+        picture = "PATCHED/PICTURE";
         class defs
         {
             class missionScriptModule

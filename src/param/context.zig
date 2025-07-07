@@ -192,22 +192,19 @@ pub const Context = struct {
 
         const gop = try self.params.getOrPut(owned_name);
         if (gop.found_existing) {
-
-            if(protect and @intFromEnum(self.access) > @intFromEnum(Access.ReadWrite)) {
+            if (protect and @intFromEnum(self.access) > @intFromEnum(Access.ReadWrite)) {
                 return error.InvalidAccess;
             }
 
             const found = gop.value_ptr.*;
-            found.deinit();
-
+            found.value.deinit(alloc);
             found.value = owned_value;
 
-            return error.ParameterAlreadyExists;
+            return;
         }
 
         const par = try alloc.create(param.Parameter);
         errdefer alloc.destroy(par);
-
 
         par.* = .{
             .parent = self,
@@ -448,7 +445,7 @@ pub const Context = struct {
             return error.AccessDenied;
         }
 
-        for (nodes) |node | {
+        for (nodes) |node| {
             switch (node) {
                 .delete => |del_name| {
                     std.debug.print("delete '{s}'\n", .{del_name});
@@ -476,8 +473,8 @@ pub const Context = struct {
                     child_ctx.release();
                 },
                 .param => |param_node| {
-                    if(std.mem.eql(u8, param_node.name, "access")) {
-                        if(self.access == .Default) {
+                    if (std.mem.eql(u8, param_node.name, "access")) {
+                        if (self.access == .Default) {
                             const parsed_access = switch (param_node.value.i32) {
                                 0 => Access.ReadWrite,
                                 1 => Access.ReadCreate,
