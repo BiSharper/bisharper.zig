@@ -546,6 +546,12 @@ pub const Context = struct {
     }
 
     fn deinit(self: *Context) void {
+        if (self.derivatives.load(.acquire) > 0) {
+            self.flags.pending_cleanup = true;
+            return;
+        }
+        self.flags.pending_cleanup = false;
+
         if (self.base) |base| {
             _ = base.derivatives.rmw(.Sub, 1, .acq_rel);
             base.checkBaseCleanup();
@@ -563,17 +569,14 @@ pub const Context = struct {
             child.deinit();
         }
 
-        {
-            std.debug.assert(self.children.count() == 0);
-            self.children.deinit();
+        self.children.deinit();
 
-            var param_it = self.params.valueIterator();
-            while (param_it.next()) |param_ptr| {
-                param_ptr.*.deinit();
-            }
-
-            self.params.deinit();
+        var param_it = self.params.valueIterator();
+        while (param_it.next()) |param_ptr| {
+            param_ptr.*.deinit();
         }
+
+        self.params.deinit();
 
         self.root.allocator.free(@volatileCast(self.parent_refs));
 
@@ -581,8 +584,10 @@ pub const Context = struct {
             parent.rw_lock.lock();
             defer parent.rw_lock.unlock();
 
-            if (parent.children.fetchRemove(self.name)) |removed_entry| {
-                self.root.allocator.free(removed_entry.key);
+            if (!self.flags.pending_cleanup) {
+                if (parent.children.fetchRemove(self.name)) |removed_entry| {
+                    self.root.allocator.free(removed_entry.key);
+                }
             }
             self.root.allocator.destroy(self);
         } else {

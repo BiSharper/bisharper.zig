@@ -28,11 +28,16 @@ pub fn main() !void {
 
     const parsed = try param.parse("config", mainBuffer, false, allocator);
     defer parsed.release();
-    //
-    // const addMissionScriptBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "addMissionScript.cpp" });
-    // defer allocator.free(addMissionScriptBuffer);
-    //
-    // try parsed.parse(addMissionScriptBuffer, true);
+
+    const modBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "config.cpp" });
+    defer allocator.free(modBuffer);
+
+    try parsed.parse(modBuffer, true);
+
+    const patchBuffer = try readFileFromParts(allocator, &.{ ".", "tests", "param", "addMissionScript.cpp" });
+    defer allocator.free(patchBuffer);
+
+    try parsed.parse(patchBuffer, true);
 
     const syntax = try parsed.toSyntax(allocator);
     defer allocator.free(syntax);
